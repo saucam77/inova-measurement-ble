@@ -14,6 +14,7 @@
   @media (min-width:720px){ .row{ grid-template-columns:1fr 1fr; } }
   button { padding:10px 14px; font-size:15px; border-radius:10px; border:0; cursor:pointer; margin-right:8px; margin-top:8px; }
   #btnConnect { background:#0a7; color:#fff; }
+  #btnDisconnect { background:#c33; color:#fff; }
   .sec { margin-top:14px; }
   .log { white-space:pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; border-radius:10px; margin-top:14px; max-height:55vh; overflow:auto; }
   .ok{color:#0a8;} .warn{color:#c80;} .err{color:#c00;} .muted{color:#666;font-size:12px;}
@@ -26,7 +27,8 @@
 <div class="row">
   <div>
     <label>GAS_ENDPOINT (Apps Script)</label>
-    <input type="text" id="endpoint" value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec">
+    <input type="text" id="endpoint"
+      value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec">
   </div>
   <div>
     <label>Service UUID (medição)</label>
@@ -52,6 +54,7 @@
 
 <div class="sec">
   <button id="btnConnect">Conectar & Assinar</button>
+  <button id="btnDisconnect">Desconectar</button>
   <button id="btnReq01">Pedir leitura (0x01)</button>
   <button id="btnReqR">Pedir leitura ("r")</button>
   <button id="btnStart">Start contínuo (0x02)</button>
@@ -67,26 +70,18 @@ const logEl = document.getElementById('log');
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 
-// Parser: tenta "valor;unidade;status" e quedas
+// === Parser Sylvac: "0000.001 <" → value=0.001, unit=mm, status=NG ===
 function decodeValue(dv){
-  try{
-    const u8=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength);
-    const txt=new TextDecoder('utf-8').decode(u8).trim();
-    const parts=txt.split(/[;,\t ]+/).filter(Boolean);
-    if(parts.length){
-      const num=parts[0].replace(',', '.');
-      if(/^[-+]?\d*\.?\d+$/.test(num)){
-        let unit='', status='';
-        if(parts[1] && /^[a-zA-Zµ°]+$/.test(parts[1])) unit=parts[1];
-        if(parts[2] && /^(OK|NG|PASS|FAIL)$/i.test(parts[2])) status=parts[2].toUpperCase();
-        return {value:parseFloat(num), unit, status, rawText:txt};
-      }
-    }
-    const m=txt.match(/-?\d+[.,]?\d*/);
-    if(m) return {value:parseFloat(m[0].replace(',', '.')), unit:'', status:'', rawText:txt};
-    if(dv.byteLength>=4){ return {value: dv.getFloat32(0,true), unit:'', status:'', rawText:''}; }
-    return {value:NaN, unit:'', status:'', rawText:txt};
-  }catch{ return {value:NaN, unit:'', status:'', rawText:''}; }
+  const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  const txt=new TextDecoder('utf-8').decode(u8).trim();
+  const clean=txt.replace(/[\r\n]/g,'').trim();
+
+  let value=NaN, unit='mm', status='OK';
+  const m=clean.match(/(-?\d+[.,]?\d*)/);
+  if(m) value = parseFloat(m[1].replace(',', '.'));
+  if (clean.includes('<') || clean.includes('>')) status='NG';
+
+  return { value, unit, status, rawText: clean };
 }
 
 async function postToSheets(endpoint, payload){
@@ -107,16 +102,15 @@ function onValue(ev){
 
 async function connectAndSubscribe(){
   try{
-    const GAS_ENDPOINT=document.getElementById('endpoint').value.trim();
     const SVC=document.getElementById('svc').value.trim();
     const CHR_NOTIFY=document.getElementById('chrNotify').value.trim();
     const CHR_INDIC=document.getElementById('chrIndicate').value.trim();
     const CHR_WRITE=document.getElementById('chrWrite').value.trim();
     const READ_BATT=document.getElementById('battery').checked;
 
-    if(!navigator.bluetooth){ log('Web Bluetooth não suportado.', 'err'); return; }
+    if(!navigator.bluetooth){ log('Web Bluetooth não suportado (use Chrome no Android).','err'); return; }
 
-    // descoberta: por prefixo 'SY' e fallback acceptAllDevices
+    // Descoberta: tenta por prefixo 'SY' e fallback acceptAllDevices
     const REQS=[
       { filters:[{namePrefix:'SY'}], optionalServices:[SVC,'battery_service','device_information'] },
       { acceptAllDevices:true, optionalServices:[SVC,'battery_service','device_information'] }
@@ -124,7 +118,7 @@ async function connectAndSubscribe(){
     let device=null;
     for(const opt of REQS){
       try{ log('Procurando dispositivo BLE…'); device=await navigator.bluetooth.requestDevice(opt); if(device) break; }
-      catch{ log('Tentativa falhou; tentando outra…','warn'); }
+      catch{ log('Tentativa de descoberta falhou; tentando outra…','warn'); }
     }
     if(!device) throw new Error('Não foi possível selecionar o dispositivo.');
 
@@ -132,6 +126,8 @@ async function connectAndSubscribe(){
 
     g.server=await device.gatt.connect();
 
+    // Bateria (opcional)
+    g.battery='';
     if(READ_BATT){
       try{
         const bs=await g.server.getPrimaryService('battery_service');
@@ -165,9 +161,16 @@ async function connectAndSubscribe(){
       log('Canal de WRITE pronto.','ok');
     }catch{ log('Characteristic WRITE não disponível.','warn'); }
 
-    g.device.addEventListener('gattserverdisconnected', ()=>log('Desconectado. Reabra para novo teste.','warn'));
-
+    g.device.addEventListener('gattserverdisconnected', ()=>log('Desconectado.','warn'));
   }catch(e){ log('Erro: '+e,'err'); }
+}
+
+function disconnectNow(){
+  try{
+    if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
+    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'' };
+    log('Conexão encerrada.','warn');
+  }catch(e){ log('Falha ao desconectar: '+e,'err'); }
 }
 
 async function writeCmd(bytes){
@@ -178,11 +181,13 @@ async function writeCmd(bytes){
   }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
 }
 
+// UI
 document.getElementById('btnConnect').addEventListener('click', connectAndSubscribe);
-document.getElementById('btnReq01').addEventListener('click', ()=>writeCmd([0x01]));      // request single reading (hipótese comum)
-document.getElementById('btnReqR').addEventListener('click', ()=>writeCmd([0x72]));       // 'r' ASCII
-document.getElementById('btnStart').addEventListener('click', ()=>writeCmd([0x02]));      // start stream (hipótese)
-document.getElementById('btnStop').addEventListener('click', ()=>writeCmd([0x03]));       // stop (hipótese)
+document.getElementById('btnDisconnect').addEventListener('click', disconnectNow);
+document.getElementById('btnReq01').addEventListener('click', ()=>writeCmd([0x01])); // hipótese comum
+document.getElementById('btnReqR').addEventListener('click', ()=>writeCmd([0x72]));  // 'r'
+document.getElementById('btnStart').addEventListener('click', ()=>writeCmd([0x02])); // start (se suportado)
+document.getElementById('btnStop').addEventListener('click', ()=>writeCmd([0x03]));  // stop (se suportado)
 </script>
 </body>
 </html>
