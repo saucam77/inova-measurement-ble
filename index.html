@@ -70,18 +70,20 @@ const logEl = document.getElementById('log');
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 
-// === Parser Sylvac: "0000.001 <" → value=0.001, unit=mm, status=NG ===
-function decodeValue(dv){
+// === Parser Sylvac com debug ===
+function decodeSylvac(dv){
   const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  const txt=new TextDecoder('utf-8').decode(u8).trim();
-  const clean=txt.replace(/[\r\n]/g,'').trim();
+  // remove bytes não-imprimíveis do começo/fim (STX=0x02, CR=0x0d, LF=0x0a etc)
+  const printable = u8.filter(b => b>=0x20 && b<=0x7E); // 0x20..0x7E
+  const txt = new TextDecoder('utf-8').decode(printable).trim();
 
-  let value=NaN, unit='mm', status='OK';
-  const m=clean.match(/(-?\d+[.,]?\d*)/);
-  if(m) value = parseFloat(m[1].replace(',', '.'));
-  if (clean.includes('<') || clean.includes('>')) status='NG';
+  // exemplos esperados: "0000.001 <", "027.99 >", "12.345"
+  let value = NaN, unit='mm', status='OK';
+  const m = txt.match(/[-+]?\d+(?:[.,]\d+)?/);
+  if (m) value = parseFloat(m[0].replace(',', '.'));
+  if (txt.includes('<') || txt.includes('>')) status='NG';
 
-  return { value, unit, status, rawText: clean };
+  return { value, unit, status, rawText: txt };
 }
 
 async function postToSheets(endpoint, payload){
@@ -92,10 +94,23 @@ async function postToSheets(endpoint, payload){
 
 function onValue(ev){
   const dv=ev.target.value;
-  const parsed=decodeValue(dv);
-  const rawHex=toHex(new Uint8Array(dv.buffer));
-  const payload={ deviceName:g.device?.name||'', deviceId:g.device?.id||'', value:parsed.value, unit:parsed.unit, status:parsed.status, battery:g.battery, rawHex };
+  const parsed=decodeSylvac(dv);
+  const rawHex=toHex(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+
+  // log de debug do texto ASCII
+  log('Texto: "'+parsed.rawText+'"', 'muted');
+
+  const payload={
+    deviceName:g.device?.name||'',
+    deviceId:g.device?.id||'',
+    value:parsed.value,
+    unit:parsed.unit,
+    status:parsed.status,
+    battery:g.battery,
+    rawHex
+  };
   log('Leitura: '+JSON.stringify(payload),'ok');
+
   const endpoint=document.getElementById('endpoint').value.trim();
   if(endpoint) postToSheets(endpoint,payload);
 }
