@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>INOVA BLE → Google Sheets (Sylvac – comandos ASCII)</title>
+<title>INOVA BLE → Google Sheets (Sylvac – ID estável + comandos)</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: Arial, sans-serif; padding:16px; line-height:1.45; }
@@ -15,6 +15,7 @@
   button { padding:10px 14px; font-size:15px; border-radius:10px; border:0; cursor:pointer; margin-right:8px; margin-top:8px; }
   #btnConnect { background:#0a7; color:#fff; }
   #btnDisconnect { background:#c33; color:#fff; }
+  #btnDisconnectAll { background:#555; color:#fff; }
   #btnSendCmd { background:#1464f4; color:#fff; }
   .sec { margin-top:14px; }
   .log { white-space:pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; border-radius:10px; margin-top:14px; max-height:55vh; overflow:auto; }
@@ -22,11 +23,13 @@
   .badge { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef; margin-left:6px; font-size:12px; }
   .cmdbar { display:grid; grid-template-columns:1fr 160px 140px; gap:10px; align-items:center; }
   @media (max-width:680px){ .cmdbar{ grid-template-columns:1fr; } }
+  .aliasbar { display:grid; grid-template-columns:1fr 180px; gap:10px; align-items:center; }
+  @media (max-width:680px){ .aliasbar{ grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
 <h1>INOVA BLE → Google Sheets <span id="idBadge" class="badge"></span></h1>
-<p class="muted">Conecte instrumentos Sylvac (Chrome Android). Receba medições e envie para a planilha. Envie comandos ASCII para o instrumento.</p>
+<p class="muted">Conecte instrumentos Sylvac (Chrome Android). Receba medições via GATT e envie para a planilha. Envie comandos ASCII ao instrumento.</p>
 
 <div class="row">
   <div>
@@ -40,7 +43,7 @@
   </div>
   <div>
     <label><input type="checkbox" id="battery" checked> Ler nível de bateria (0x180F/0x2A19)</label>
-    <div class="muted">Aceite o pareamento quando o Android pedir. Mantenha o instrumento “acordado”.</div>
+    <div class="muted">Aceite o pareamento se o Android solicitar. Mantenha o instrumento “acordado”.</div>
   </div>
   <div>
     <label><input type="checkbox" id="keepalive" checked> Manter conexão ativa (keep-alive a cada 2s)</label>
@@ -51,10 +54,21 @@
 <div class="sec">
   <button id="btnConnect">Conectar & Assinar</button>
   <button id="btnDisconnect">Desconectar</button>
+  <button id="btnDisconnectAll">Desconectar Todos</button>
   <button id="btnReq01">Pedir leitura (0x01)</button>
   <button id="btnReqR">Pedir leitura ("r")</button>
   <button id="btnStart">Start contínuo (0x02)</button>
   <button id="btnStop">Stop (0x03)</button>
+</div>
+
+<!-- Alias do instrumento -->
+<div class="sec">
+  <label>Apelido (alias) do instrumento</label>
+  <div class="aliasbar">
+    <input id="aliasInput" type="text" placeholder="Ex.: OP10_Paquimetro01" />
+    <button id="btnSaveAlias">Salvar alias</button>
+  </div>
+  <div class="muted">O alias é salvo no navegador (localStorage) por ID estável e enviado à planilha.</div>
 </div>
 
 <!-- Barra de comandos ASCII -->
@@ -73,7 +87,7 @@
     </select>
     <button id="btnSendCmd">Enviar comando</button>
   </div>
-  <div class="muted">As respostas aparecem no log como “RemoteResp texto: …”.</div>
+  <div class="muted">Respostas aparecem no log como “RemoteResp texto: …”.</div>
 </div>
 
 <div class="log" id="log"></div>
@@ -85,16 +99,34 @@ let g = {
   cRemoteResp:null,   // NOTIFY   (respostas a comandos)
   cRemoteReq:null,    // WRITE    (enviar comandos)
   battery:'', label:'', model:'', serial:'',
-  keepTimer:null, reconnecting:false
+  systemId:'', pnpId:'', stableId:'',
+  keepTimer:null, reconnecting:false, alias:''
 };
 
 const CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
 
 const logEl = document.getElementById('log');
 const badge = document.getElementById('idBadge');
+const aliasInput = document.getElementById('aliasInput');
+
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 function setBadge(txt){ badge.textContent = txt || ''; }
+
+function saveAlias(){
+  if(!g.stableId) return;
+  const a = aliasInput.value.trim();
+  g.alias = a;
+  const map = JSON.parse(localStorage.getItem('inova_ble_alias')||'{}');
+  map[g.stableId] = a;
+  localStorage.setItem('inova_ble_alias', JSON.stringify(map));
+  log(`Alias salvo: ${g.stableId} → "${a||'(vazio)'}"`, 'ok');
+}
+function loadAlias(){
+  const map = JSON.parse(localStorage.getItem('inova_ble_alias')||'{}');
+  g.alias = (g.stableId && map[g.stableId]) || '';
+  aliasInput.value = g.alias;
+}
 
 // === Parser Sylvac: "+014.736 >" → value=14.736, unit=mm, status=NG ===
 function decodeSylvac(dv){
@@ -125,13 +157,15 @@ function handleValueFrom(charRole, ev){
 
   // Só envia à planilha se for leitura numérica (medição)
   if (charRole==='data' && !Number.isNaN(parsed.value)) {
-    const stableId = (g.serial && ('SN:'+g.serial)) || (g.model && ('MODEL:'+g.model)) || (g.device?.name||'');
     const payload={
       deviceName: g.label || (g.device?.name||''),
-      deviceId: stableId,                 // ID estável (MODEL/SN)
+      stableId: g.stableId,              // ID estável para rastreio
+      alias: g.alias || '',
       chromeDeviceId: g.device?.id || '', // id opaco do Chrome (referência)
       model: g.model || '',
       serial: g.serial || '',
+      systemId: g.systemId || '',
+      pnpId: g.pnpId || '',
       value: parsed.value,
       unit: parsed.unit,
       status: parsed.status,
@@ -146,7 +180,7 @@ function handleValueFrom(charRole, ev){
 
 async function readDIS(){
   g.label = g.device?.name || '';
-  g.model = ''; g.serial='';
+  g.model = ''; g.serial=''; g.systemId=''; g.pnpId='';
 
   try{
     const dis = await g.server.getPrimaryService('device_information');
@@ -157,14 +191,33 @@ async function readDIS(){
         return new TextDecoder('utf-8').decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).trim();
       }catch{ return ''; }
     }
-    g.serial = await readStr('serial_number_string');      // 0x2A25
-    g.model  = await readStr('model_number_string');       // 0x2A24
-    const fw = await readStr('firmware_revision_string');  // 0x2A26
-    const mfg= await readStr('manufacturer_name_string');  // 0x2A29
+    async function readBin(uuid){
+      try{
+        const c = await dis.getCharacteristic(uuid);
+        const v = await c.readValue();
+        return Array.from(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))
+                    .map(b=>b.toString(16).padStart(2,'0')).join(':');
+      }catch{ return ''; }
+    }
+
+    g.serial  = await readStr('serial_number_string');      // 0x2A25
+    g.model   = await readStr('model_number_string');       // 0x2A24
+    const fw  = await readStr('firmware_revision_string');  // 0x2A26
+    const mfg = await readStr('manufacturer_name_string');  // 0x2A29
+    g.systemId = await readBin('system_id');                // 0x2A23 (binário)
+    g.pnpId    = await readBin('pnp_id');                   // 0x2A50 (binário)
+
+    // monta stableId
+    g.stableId = g.serial ? ('SN:'+g.serial)
+                 : (g.systemId ? ('SYSID:'+g.systemId)
+                 : (g.pnpId ? ('PNP:'+g.pnpId)
+                 : ('MODEL:'+ (g.model||'') +'#'+ (fw||'') +'#'+ (g.device?.id||''))));
 
     g.label = (g.model ? ('MODEL '+g.model) : '') + (g.serial ? (' / S/N '+g.serial) : '') || g.label;
-    setBadge(g.label);
-    log(`DIS: model=${g.model||'-'} serial=${g.serial||'-'} fw=${fw||'-'} mfg=${mfg||'-'}`, 'muted');
+    setBadge(g.label + (g.stableId ? (' · '+g.stableId) : ''));
+    log(`DIS: model=${g.model||'-'} serial=${g.serial||'-'} sysId=${g.systemId||'-'} pnpId=${g.pnpId||'-'}`, 'muted');
+
+    loadAlias();
   }catch{
     setBadge(g.label);
     log('Device Information Service não disponível (seguindo).','warn');
@@ -190,7 +243,7 @@ function startKeepAlive(){
 
 async function enableCccd(characteristic, enableValue){
   try{
-    const cccd = await characteristic.getDescriptor('00002902-0000-1000-8000-00805f9b34fb');
+    const cccd = await characteristic.getDescriptor(CCCD_UUID);
     await cccd.writeValue(Uint8Array.of(enableValue, 0x00));
   }catch(_){ /* alguns stacks já fazem via startNotifications */ }
 }
@@ -289,10 +342,23 @@ function disconnectNow(){
     clearInterval(g.keepTimer);
     if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
     g = { device:null, server:null, svc:null, cDataSend:null, cRemoteResp:null, cRemoteReq:null,
-          battery:'', label:'', model:'', serial:'', keepTimer:null, reconnecting:false };
+          battery:'', label:'', model:'', serial:'', systemId:'', pnpId:'', stableId:'',
+          keepTimer:null, reconnecting:false, alias:'' };
     setBadge('');
+    aliasInput.value='';
     log('Conexão encerrada.','warn');
   }catch(e){ log('Falha ao desconectar: '+e,'err'); }
+}
+
+async function disconnectAll(){
+  try{
+    const granted = await navigator.bluetooth.getDevices();
+    let n = 0;
+    for(const d of granted){
+      if (d.gatt && d.gatt.connected){ d.gatt.disconnect(); n++; }
+    }
+    log(`Desconectei ${n} dispositivo(s) concedidos a este site.`, 'ok');
+  }catch(e){ log('Falha ao desconectar todos: '+e, 'err'); }
 }
 
 async function writeCmdHex(bytes){
@@ -312,15 +378,16 @@ async function writeCmdAscii(str){
   }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
 }
 
-// UI – botões básicos
+// UI
 document.getElementById('btnConnect').addEventListener('click', connectAndSubscribe);
 document.getElementById('btnDisconnect').addEventListener('click', disconnectNow);
+document.getElementById('btnDisconnectAll').addEventListener('click', disconnectAll);
 document.getElementById('btnReq01').addEventListener('click', ()=>writeCmdHex([0x01]));
 document.getElementById('btnReqR').addEventListener('click', ()=>writeCmdAscii('r'));
 document.getElementById('btnStart').addEventListener('click', ()=>writeCmdHex([0x02]));
 document.getElementById('btnStop').addEventListener('click', ()=>writeCmdHex([0x03]));
 
-// UI – barra de comandos ASCII
+// Comandos ASCII
 const cmdInput = document.getElementById('cmdInput');
 const cmdPreset = document.getElementById('cmdPreset');
 document.getElementById('btnSendCmd').addEventListener('click', ()=>{
@@ -337,6 +404,9 @@ cmdPreset.addEventListener('change', ()=>{
   writeCmdAscii(v);
   cmdPreset.selectedIndex = 0;
 });
+
+// Alias
+document.getElementById('btnSaveAlias').addEventListener('click', saveAlias);
 </script>
 </body>
 </html>
