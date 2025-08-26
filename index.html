@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>INOVA BLE → Google Sheets (Sylvac – ID estável + comandos)</title>
+<title>INOVA BLE → Sheets (Multi-dispositivo)</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: Arial, sans-serif; padding:16px; line-height:1.45; }
@@ -21,392 +21,321 @@
   .log { white-space:pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; border-radius:10px; margin-top:14px; max-height:55vh; overflow:auto; }
   .ok{color:#0a8;} .warn{color:#c80;} .err{color:#c00;} .muted{color:#666;font-size:12px;}
   .badge { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef; margin-left:6px; font-size:12px; }
-  .cmdbar { display:grid; grid-template-columns:1fr 160px 140px; gap:10px; align-items:center; }
-  @media (max-width:680px){ .cmdbar{ grid-template-columns:1fr; } }
-  .aliasbar { display:grid; grid-template-columns:1fr 180px; gap:10px; align-items:center; }
-  @media (max-width:680px){ .aliasbar{ grid-template-columns:1fr; } }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  @media (max-width:680px){ .grid2{ grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
-<h1>INOVA BLE → Google Sheets <span id="idBadge" class="badge"></span></h1>
-<p class="muted">Conecte instrumentos Sylvac (Chrome Android). Receba medições via GATT e envie para a planilha. Envie comandos ASCII ao instrumento.</p>
+<h1>INOVA BLE → Google Sheets <span id="pageBadge" class="badge"></span></h1>
+<p class="muted">Multi-dispositivo: conecte vários Sylvac ao mesmo tempo. Selecione o ativo para enviar comandos.</p>
 
 <div class="row">
   <div>
-    <label>GAS_ENDPOINT (Apps Script)</label>
-    <input type="text" id="endpoint"
+    <label>GAS_ENDPOINT</label>
+    <input id="endpoint" type="text"
       value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec">
   </div>
   <div>
     <label>Service UUID (Sylvac – medição)</label>
-    <input type="text" id="svc" value="c1b25000-caaf-6d0e-4c33-7dae30052840">
+    <input id="svc" type="text" value="c1b25000-caaf-6d0e-4c33-7dae30052840">
   </div>
   <div>
     <label><input type="checkbox" id="battery" checked> Ler nível de bateria (0x180F/0x2A19)</label>
-    <div class="muted">Aceite o pareamento se o Android solicitar. Mantenha o instrumento “acordado”.</div>
+    <div class="muted">Mantenha o instrumento “acordado”.</div>
   </div>
   <div>
-    <label><input type="checkbox" id="keepalive" checked> Manter conexão ativa (keep-alive a cada 2s)</label>
-    <label><input type="checkbox" id="autorec" checked> Auto-reconectar ao mesmo dispositivo</label>
+    <label><input type="checkbox" id="keepalive" checked> Keep-alive (2s)</label>
+    <label><input type="checkbox" id="autorec" checked> Auto-reconnect</label>
   </div>
 </div>
 
 <div class="sec">
-  <button id="btnConnect">Conectar & Assinar</button>
-  <button id="btnDisconnect">Desconectar</button>
-  <button id="btnDisconnectAll">Desconectar Todos</button>
-  <button id="btnReq01">Pedir leitura (0x01)</button>
-  <button id="btnReqR">Pedir leitura ("r")</button>
-  <button id="btnStart">Start contínuo (0x02)</button>
-  <button id="btnStop">Stop (0x03)</button>
+  <button id="btnConnect">+ Adicionar conexão</button>
+  <select id="selActive" title="Conectados" style="min-width:280px"></select>
+  <button id="btnDisconnect">Desconectar selecionado</button>
+  <button id="btnDisconnectAll">Desconectar TODOS</button>
 </div>
 
-<!-- Alias do instrumento -->
-<div class="sec">
-  <label>Apelido (alias) do instrumento</label>
-  <div class="aliasbar">
-    <input id="aliasInput" type="text" placeholder="Ex.: OP10_Paquimetro01" />
-    <button id="btnSaveAlias">Salvar alias</button>
+<div class="sec grid2">
+  <div>
+    <label>Alias do instrumento</label>
+    <div class="grid2">
+      <input id="aliasInput" type="text" placeholder="Ex.: OP10_Paq01">
+      <button id="btnSaveAlias">Salvar alias</button>
+    </div>
+    <div class="muted">Alias salvo por ID estável (serial/systemId/pnpId) no navegador e enviado à planilha.</div>
   </div>
-  <div class="muted">O alias é salvo no navegador (localStorage) por ID estável e enviado à planilha.</div>
-</div>
-
-<!-- Barra de comandos ASCII -->
-<div class="sec">
-  <label>Comandos ASCII (RemoteReq → RemoteResp)</label>
-  <div class="cmdbar">
-    <input id="cmdInput" type="text" placeholder='Ex.: VER?  (ENTER envia). Sufixo "\r" é adicionado.' />
-    <select id="cmdPreset">
-      <option value="">— Atalhos —</option>
-      <option value="r">r  (Requisitar leitura)</option>
-      <option value="VER?">VER?  (Versão)</option>
-      <option value="ID?">ID?  (Identificação)</option>
-      <option value="SN?">SN?  (Serial)</option>
-      <option value="UNIT?">UNIT?  (Unidade)</option>
-      <option value="TOL?">TOL?  (Tolerância)</option>
-    </select>
+  <div>
+    <label>Comandos ASCII (RemoteReq → RemoteResp)</label>
+    <div class="grid2">
+      <input id="cmdInput" type="text" placeholder='Ex.: VER?  (ENTER envia). Sufixo "\r" é adicionado.' />
+      <select id="cmdPreset">
+        <option value="">— Atalhos —</option>
+        <option value="r">r  (Requisitar leitura)</option>
+        <option value="VER?">VER?  (Versão)</option>
+        <option value="ID?">ID?  (Identificação)</option>
+        <option value="SN?">SN?  (Serial)</option>
+        <option value="UNIT?">UNIT?  (Unidade)</option>
+        <option value="TOL?">TOL?  (Tolerância)</option>
+      </select>
+    </div>
     <button id="btnSendCmd">Enviar comando</button>
   </div>
-  <div class="muted">Respostas aparecem no log como “RemoteResp texto: …”.</div>
 </div>
 
 <div class="log" id="log"></div>
 
 <script>
-let g = {
-  device:null, server:null, svc:null,
-  cDataSend:null,     // INDICATE (envia medições)
-  cRemoteResp:null,   // NOTIFY   (respostas a comandos)
-  cRemoteReq:null,    // WRITE    (enviar comandos)
-  battery:'', label:'', model:'', serial:'',
-  systemId:'', pnpId:'', stableId:'',
-  keepTimer:null, reconnecting:false, alias:''
-};
+/* ===== Infra de sessões (multi-dispositivo) ===== */
+const sessions = new Map();  // key = chrome device.id -> Session
+const selActive = document.getElementById('selActive');
 
-const CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
+class Session {
+  constructor(device){ this.device=device; this.server=null; this.svc=null;
+    this.cDataSend=null; this.cRemoteResp=null; this.cRemoteReq=null;
+    this.label=device.name||''; this.model=''; this.serial=''; this.systemId=''; this.pnpId='';
+    this.stableId=''; this.alias=''; this.battery=''; this.keepTimer=null; this.reconnecting=false; }
+}
+function active(){ const id=selActive.value; return id? sessions.get(id):null; }
+function addSelectOption(sess){
+  const o=document.createElement('option');
+  o.value=sess.device.id;
+  o.textContent=`${sess.label||'(sem nome)'} · ${sess.device.id}`;
+  selActive.appendChild(o);
+  selActive.value=sess.device.id;
+}
+function refreshSelectLabel(sess){
+  const opt=[...selActive.options].find(o=>o.value===sess.device.id);
+  if(opt) opt.textContent = `${sess.label||'(sem nome)'} · ${sess.device.id}`;
+}
 
-const logEl = document.getElementById('log');
-const badge = document.getElementById('idBadge');
-const aliasInput = document.getElementById('aliasInput');
-
+/* ===== Util ===== */
+const logEl=document.getElementById('log'), pageBadge=document.getElementById('pageBadge');
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
-function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
-function setBadge(txt){ badge.textContent = txt || ''; }
+function hex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
+function setPageBadge(){ pageBadge.textContent = `Conexões: ${sessions.size}`; }
 
-function saveAlias(){
-  if(!g.stableId) return;
-  const a = aliasInput.value.trim();
-  g.alias = a;
-  const map = JSON.parse(localStorage.getItem('inova_ble_alias')||'{}');
-  map[g.stableId] = a;
-  localStorage.setItem('inova_ble_alias', JSON.stringify(map));
-  log(`Alias salvo: ${g.stableId} → "${a||'(vazio)'}"`, 'ok');
-}
-function loadAlias(){
-  const map = JSON.parse(localStorage.getItem('inova_ble_alias')||'{}');
-  g.alias = (g.stableId && map[g.stableId]) || '';
-  aliasInput.value = g.alias;
-}
-
-// === Parser Sylvac: "+014.736 >" → value=14.736, unit=mm, status=NG ===
+/* ===== Decoder Sylvac ===== */
 function decodeSylvac(dv){
   const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
   const printable = u8.filter(b => b>=0x20 && b<=0x7E);
-  const txt = new TextDecoder('utf-8').decode(printable).trim();
-
-  let value = NaN, unit='mm', status='OK';
-  const m = txt.match(/[-+]?\d+(?:[.,]\d+)?/);
-  if (m) value = parseFloat(m[0].replace(',', '.'));
-  if (txt.includes('<') || txt.includes('>')) status='NG';
-
+  const txt = new TextDecoder().decode(printable).trim();
+  let value=NaN, unit='mm', status='OK';
+  const m = txt.match(/[-+]?\d+(?:[.,]\d+)?/); if(m) value=parseFloat(m[0].replace(',','.'));
+  if (txt.includes('<')||txt.includes('>')) status='NG';
   return { value, unit, status, rawText: txt };
 }
 
-async function postToSheets(endpoint, payload){
+/* ===== GAS ===== */
+async function postToSheets(payload){
+  const endpoint=document.getElementById('endpoint').value.trim();
+  if(!endpoint) return;
   try{
     await fetch(endpoint,{ method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
-  }catch(e){ log('Falha ao enviar ao GAS: '+e,'warn'); }
+  }catch(e){ log('Falha ao enviar ao GAS: '+e, 'warn'); }
 }
 
-function handleValueFrom(charRole, ev){
-  const dv=ev.target.value;
-  const parsed=decodeSylvac(dv);
-  const rawHex=toHex(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
-  const who = (charRole==='data' ? 'DataSend' : 'RemoteResp');
-  log(`${who} texto: "`+parsed.rawText+'"', 'muted');
-
-  // Só envia à planilha se for leitura numérica (medição)
-  if (charRole==='data' && !Number.isNaN(parsed.value)) {
-    const payload={
-      deviceName: g.label || (g.device?.name||''),
-      stableId: g.stableId,              // ID estável para rastreio
-      alias: g.alias || '',
-      chromeDeviceId: g.device?.id || '', // id opaco do Chrome (referência)
-      model: g.model || '',
-      serial: g.serial || '',
-      systemId: g.systemId || '',
-      pnpId: g.pnpId || '',
-      value: parsed.value,
-      unit: parsed.unit,
-      status: parsed.status,
-      battery: g.battery,
-      rawHex
-    };
-    log('Leitura: '+JSON.stringify(payload),'ok');
-    const endpoint=document.getElementById('endpoint').value.trim();
-    if(endpoint) postToSheets(endpoint,payload);
-  }
-}
-
-async function readDIS(){
-  g.label = g.device?.name || '';
-  g.model = ''; g.serial=''; g.systemId=''; g.pnpId='';
-
+/* ===== DIS & ID estável ===== */
+async function readDIS(sess){
   try{
-    const dis = await g.server.getPrimaryService('device_information');
-    async function readStr(uuid){
-      try{
-        const c = await dis.getCharacteristic(uuid);
-        const v = await c.readValue();
-        return new TextDecoder('utf-8').decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).trim();
-      }catch{ return ''; }
-    }
-    async function readBin(uuid){
-      try{
-        const c = await dis.getCharacteristic(uuid);
-        const v = await c.readValue();
-        return Array.from(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))
-                    .map(b=>b.toString(16).padStart(2,'0')).join(':');
-      }catch{ return ''; }
-    }
+    const dis = await sess.server.getPrimaryService('device_information');
+    async function readStr(uuid){ try{ const c=await dis.getCharacteristic(uuid); const v=await c.readValue(); return new TextDecoder().decode(v).trim(); }catch{return '';} }
+    async function readBin(uuid){ try{ const c=await dis.getCharacteristic(uuid); const v=await c.readValue(); return Array.from(new Uint8Array(v.buffer)).map(b=>b.toString(16).padStart(2,'0')).join(':'); }catch{return '';} }
 
-    g.serial  = await readStr('serial_number_string');      // 0x2A25
-    g.model   = await readStr('model_number_string');       // 0x2A24
-    const fw  = await readStr('firmware_revision_string');  // 0x2A26
-    const mfg = await readStr('manufacturer_name_string');  // 0x2A29
-    g.systemId = await readBin('system_id');                // 0x2A23 (binário)
-    g.pnpId    = await readBin('pnp_id');                   // 0x2A50 (binário)
+    sess.serial   = await readStr('serial_number_string');      // 0x2A25
+    sess.model    = await readStr('model_number_string');       // 0x2A24
+    const fw      = await readStr('firmware_revision_string');  // 0x2A26
+    sess.systemId = await readBin('system_id');                 // 0x2A23
+    sess.pnpId    = await readBin('pnp_id');                    // 0x2A50
 
-    // monta stableId
-    g.stableId = g.serial ? ('SN:'+g.serial)
-                 : (g.systemId ? ('SYSID:'+g.systemId)
-                 : (g.pnpId ? ('PNP:'+g.pnpId)
-                 : ('MODEL:'+ (g.model||'') +'#'+ (fw||'') +'#'+ (g.device?.id||''))));
+    sess.label = (sess.model?('MODEL '+sess.model):sess.label) + (sess.serial?(' / S/N '+sess.serial):'');
+    sess.stableId = sess.serial ? ('SN:'+sess.serial)
+                    : (sess.systemId?('SYSID:'+sess.systemId)
+                    : (sess.pnpId?('PNP:'+sess.pnpId)
+                    : ('MODEL:'+ (sess.model||'') +'#'+ (fw||'') +'#'+ sess.device.id)));
+    refreshSelectLabel(sess);
+    setPageBadge();
 
-    g.label = (g.model ? ('MODEL '+g.model) : '') + (g.serial ? (' / S/N '+g.serial) : '') || g.label;
-    setBadge(g.label + (g.stableId ? (' · '+g.stableId) : ''));
-    log(`DIS: model=${g.model||'-'} serial=${g.serial||'-'} sysId=${g.systemId||'-'} pnpId=${g.pnpId||'-'}`, 'muted');
+    // Alias armazenado
+    const map = JSON.parse(localStorage.getItem('inova_ble_alias')||'{}');
+    sess.alias = map[sess.stableId] || '';
+    if(active()===sess) document.getElementById('aliasInput').value=sess.alias;
 
-    loadAlias();
-  }catch{
-    setBadge(g.label);
-    log('Device Information Service não disponível (seguindo).','warn');
-  }
+    log(`DIS(${sess.device.id}): model=${sess.model||'-'} serial=${sess.serial||'-'} sysId=${sess.systemId||'-'} pnpId=${sess.pnpId||'-'}`, 'muted');
+  }catch{ log('DIS não disponível (seguindo).','warn'); }
 }
 
-function startKeepAlive(){
-  clearInterval(g.keepTimer);
-  if (!document.getElementById('keepalive').checked) return;
-  g.keepTimer = setInterval(async () => {
-    try{
-      if (g?.server?.connected) {
-        if (g.cRemoteReq) {
-          await g.cRemoteReq.writeValueWithoutResponse(Uint8Array.from([0x01])); // ping leve
-        } else {
-          const bs=await g.server.getPrimaryService('battery_service').catch(()=>null);
-          if (bs) { const bc=await bs.getCharacteristic('battery_level').catch(()=>null); if (bc) await bc.readValue(); }
-        }
-      }
-    }catch(_){ /* silencioso */ }
-  }, 2000);
-}
-
-async function enableCccd(characteristic, enableValue){
+/* ===== CCCD helper ===== */
+async function enableCCCD(ch, val){
   try{
-    const cccd = await characteristic.getDescriptor(CCCD_UUID);
-    await cccd.writeValue(Uint8Array.of(enableValue, 0x00));
-  }catch(_){ /* alguns stacks já fazem via startNotifications */ }
+    const d = await ch.getDescriptor('00002902-0000-1000-8000-00805f9b34fb');
+    await d.writeValue(Uint8Array.of(val,0x00));
+  }catch{}
 }
 
-async function setupServiceAndChars(SVC){
-  g.svc = await g.server.getPrimaryService(SVC);
+/* ===== Setup serviço e callbacks ===== */
+async function setupSylvac(sess, SVC){
+  sess.svc = await sess.server.getPrimaryService(SVC);
+  const chars = await sess.svc.getCharacteristics();
+  sess.cDataSend=null; sess.cRemoteResp=null; sess.cRemoteReq=null;
 
-  const chars = await g.svc.getCharacteristics();
-  g.cDataSend = null; g.cRemoteResp = null; g.cRemoteReq = null;
-
-  for (const c of chars) {
-    const p = c.properties || {};
-    if (!g.cDataSend   && p.indicate)                 g.cDataSend = c;             // DataSend
-    if (!g.cRemoteResp && p.notify)                   g.cRemoteResp = c;           // RemoteResp
-    if (!g.cRemoteReq  && (p.writeWithoutResponse || p.write)) g.cRemoteReq = c;   // RemoteReq
+  for (const c of chars){
+    const p=c.properties||{};
+    if(!sess.cDataSend && p.indicate) sess.cDataSend=c;
+    if(!sess.cRemoteResp && p.notify) sess.cRemoteResp=c;
+    if(!sess.cRemoteReq && (p.writeWithoutResponse||p.write)) sess.cRemoteReq=c;
   }
-
-  if (g.cDataSend) {
-    await g.cDataSend.startNotifications();
-    await enableCccd(g.cDataSend, 0x02); // 0x02 = Indications
-    g.cDataSend.addEventListener('characteristicvaluechanged', e=>handleValueFrom('data',e));
-    log('DataSend (INDICATE) assinada ('+g.cDataSend.uuid+'). Gere uma medida…','ok');
-  } else {
-    log('Characteristic DataSend (INDICATE) não encontrada.','warn');
-  }
-
-  if (g.cRemoteResp) {
-    await g.cRemoteResp.startNotifications();
-    await enableCccd(g.cRemoteResp, 0x01); // 0x01 = Notifications
-    g.cRemoteResp.addEventListener('characteristicvaluechanged', e=>handleValueFrom('resp',e));
-    log('RemoteResp (NOTIFY) assinada ('+g.cRemoteResp.uuid+').','ok');
-  }
-
-  if (g.cRemoteReq) log('RemoteReq (WRITE) disponível ('+g.cRemoteReq.uuid+').','ok');
-  else log('Characteristic RemoteReq (WRITE) não encontrada.','warn');
-
-  startKeepAlive();
-}
-
-async function connectFlow(device){
-  g.device = device;
-  log(`Selecionado: ${device.name||'(sem nome)'} — ID Chrome: ${device.id}`);
-
-  g.server = await device.gatt.connect();
-
-  // Bateria (opcional)
-  g.battery='';
-  if (document.getElementById('battery').checked) {
-    try{
-      const bs=await g.server.getPrimaryService('battery_service');
-      const bc=await bs.getCharacteristic('battery_level');
-      g.battery=(await bc.readValue()).getUint8(0);
-      log(`Bateria: ${g.battery}%`,'ok');
-    }catch{ log('Battery service indisponível.','warn'); }
-  }
-
-  await readDIS();
-  await setupServiceAndChars(document.getElementById('svc').value.trim());
-
-  device.addEventListener('gattserverdisconnected', async () => {
-    log('Desconectado.','warn');
-    clearInterval(g.keepTimer);
-    if (document.getElementById('autorec').checked && !g.reconnecting) {
-      g.reconnecting = true;
-      try{
-        log('Tentando reconectar ao mesmo dispositivo…','muted');
-        await device.gatt.connect();
-        g.reconnecting = false;
-        log('Reconectado.','ok');
-        await setupServiceAndChars(document.getElementById('svc').value.trim());
-      } catch {
-        g.reconnecting = false;
-        log('Falha ao reconectar. Toque em “Conectar & Assinar”.','warn');
+  if(sess.cDataSend){
+    await sess.cDataSend.startNotifications();
+    await enableCCCD(sess.cDataSend, 0x02);
+    sess.cDataSend.addEventListener('characteristicvaluechanged', ev=>{
+      const dv=ev.target.value, parsed=decodeSylvac(dv);
+      log(`DataSend[${sess.device.id}] "${parsed.rawText}"`, 'muted');
+      if(!Number.isNaN(parsed.value)){
+        const payload={
+          deviceName: sess.label, stableId: sess.stableId, alias: sess.alias,
+          chromeDeviceId: sess.device.id, model: sess.model, serial: sess.serial,
+          systemId: sess.systemId, pnpId: sess.pnpId,
+          value: parsed.value, unit: parsed.unit, status: parsed.status,
+          battery: sess.battery, rawHex: hex(new Uint8Array(dv.buffer))
+        };
+        log('Leitura → '+JSON.stringify(payload),'ok');
+        postToSheets(payload);
       }
-    }
-  });
+    });
+    log('DataSend (INDICATE) assinada.','ok');
+  } else log('DataSend não encontrada.','warn');
+
+  if(sess.cRemoteResp){
+    await sess.cRemoteResp.startNotifications();
+    await enableCCCD(sess.cRemoteResp, 0x01);
+    sess.cRemoteResp.addEventListener('characteristicvaluechanged', ev=>{
+      const parsed=decodeSylvac(ev.target.value);
+      log(`RemoteResp[${sess.device.id}] "${parsed.rawText}"`, 'muted');
+    });
+    log('RemoteResp (NOTIFY) assinada.','ok');
+  }
+  if(sess.cRemoteReq) log('RemoteReq (WRITE) disponível.','ok'); else log('RemoteReq não encontrada.','warn');
 }
 
-async function connectAndSubscribe(){
+/* ===== Keep-alive ===== */
+function startKeepAlive(sess){
+  clearInterval(sess.keepTimer);
+  if(!document.getElementById('keepalive').checked) return;
+  sess.keepTimer=setInterval(async()=>{
+    try{
+      if(sess.server?.connected && sess.cRemoteReq){
+        await sess.cRemoteReq.writeValueWithoutResponse(Uint8Array.of(0x01));
+      }
+    }catch{}
+  },2000);
+}
+
+/* ===== Conexão ===== */
+async function connectDevice(){
   try{
     const SVC=document.getElementById('svc').value.trim();
-    if(!navigator.bluetooth){ log('Web Bluetooth não suportado (use Chrome no Android).','err'); return; }
-    const opts = { acceptAllDevices:true, optionalServices:[SVC,'battery_service','device_information'] };
-    log('Procurando dispositivo BLE…');
-    const device = await navigator.bluetooth.requestDevice(opts);
-    if(!device) throw new Error('Seleção cancelada.');
-    await connectFlow(device);
-  }catch(e){
-    log('Erro: '+e,'err');
-  }
+    const dev = await navigator.bluetooth.requestDevice({
+      acceptAllDevices:true,
+      optionalServices:[SVC,'battery_service','device_information']
+    });
+    if(!dev) return;
+
+    const sess=new Session(dev);
+    sessions.set(dev.id, sess);
+    addSelectOption(sess); setPageBadge();
+    log(`Selecionado: ${dev.name||'(sem nome)'} — ID ${dev.id}`);
+
+    sess.server = await dev.gatt.connect();
+
+    if (document.getElementById('battery').checked) {
+      try{
+        const bs=await sess.server.getPrimaryService('battery_service');
+        const bc=await bs.getCharacteristic('battery_level');
+        sess.battery=(await bc.readValue()).getUint8(0);
+        log(`Bateria[${dev.id}]: ${sess.battery}%`,'ok');
+      }catch{ log('Battery service indisponível.','warn'); }
+    }
+
+    await readDIS(sess);
+    await setupSylvac(sess, SVC);
+    startKeepAlive(sess);
+
+    dev.addEventListener('gattserverdisconnected', async ()=>{
+      log(`Desconectado: ${dev.id}`,'warn');
+      clearInterval(sess.keepTimer);
+      if(document.getElementById('autorec').checked && !sess.reconnecting){
+        sess.reconnecting=true;
+        try{
+          await dev.gatt.connect(); sess.reconnecting=false;
+          log(`Reconectado: ${dev.id}`,'ok');
+          await setupSylvac(sess,SVC); startKeepAlive(sess);
+        }catch{ sess.reconnecting=false; }
+      }
+    });
+  }catch(e){ log('Erro: '+e,'err'); }
 }
 
-function disconnectNow(){
+/* ===== Desconectar ===== */
+function disconnectSelected(){
+  const s=active(); if(!s) { log('Nada selecionado.','warn'); return; }
   try{
-    document.getElementById('autorec').checked = false;
-    clearInterval(g.keepTimer);
-    if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
-    g = { device:null, server:null, svc:null, cDataSend:null, cRemoteResp:null, cRemoteReq:null,
-          battery:'', label:'', model:'', serial:'', systemId:'', pnpId:'', stableId:'',
-          keepTimer:null, reconnecting:false, alias:'' };
-    setBadge('');
-    aliasInput.value='';
-    log('Conexão encerrada.','warn');
+    clearInterval(s.keepTimer);
+    if(s.server?.connected) s.device.gatt.disconnect();
+    sessions.delete(s.device.id);
+    const idx=selActive.selectedIndex;
+    selActive.remove(idx);
+    setPageBadge();
+    log(`Encerrado: ${s.device.id}`,'warn');
   }catch(e){ log('Falha ao desconectar: '+e,'err'); }
 }
-
-async function disconnectAll(){
-  try{
-    const granted = await navigator.bluetooth.getDevices();
-    let n = 0;
-    for(const d of granted){
-      if (d.gatt && d.gatt.connected){ d.gatt.disconnect(); n++; }
-    }
-    log(`Desconectei ${n} dispositivo(s) concedidos a este site.`, 'ok');
-  }catch(e){ log('Falha ao desconectar todos: '+e, 'err'); }
+function disconnectAll(){
+  for(const s of sessions.values()){
+    try{ clearInterval(s.keepTimer); if(s.server?.connected) s.device.gatt.disconnect(); }catch{}
+  }
+  sessions.clear();
+  selActive.innerHTML='';
+  setPageBadge();
+  log('Todos desconectados.','ok');
 }
 
-async function writeCmdHex(bytes){
-  if(!g.cRemoteReq){ log('WRITE não disponível.','err'); return; }
-  try{
-    await g.cRemoteReq.writeValueWithoutResponse(new Uint8Array(bytes));
-    log('Comando (hex) enviado: '+bytes.map(b=>'0x'+b.toString(16).padStart(2,'0')).join(' '));
-  }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
+/* ===== Comandos / Alias ===== */
+function sendAscii(){
+  const s=active(); if(!s){ log('Selecione um dispositivo.','warn'); return; }
+  if(!s.cRemoteReq){ log('WRITE não disponível.','err'); return; }
+  let txt=document.getElementById('cmdInput').value.trim();
+  if(!txt) return; if(!txt.endsWith('\r')) txt+='\r';
+  s.cRemoteReq.writeValueWithoutResponse(new TextEncoder().encode(txt)).then(()=>{
+    log(`ASCII[${s.device.id}] → ${JSON.stringify(txt)}`);
+  }).catch(e=>log('Falha cmd: '+e,'err'));
+}
+function saveAlias(){
+  const s=active(); if(!s) return;
+  const a=document.getElementById('aliasInput').value.trim();
+  s.alias=a;
+  const map=JSON.parse(localStorage.getItem('inova_ble_alias')||'{}'); map[s.stableId]=a;
+  localStorage.setItem('inova_ble_alias', JSON.stringify(map));
+  log(`Alias salvo (${s.stableId}) → "${a||'(vazio)'}"`, 'ok');
 }
 
-async function writeCmdAscii(str){
-  if(!g.cRemoteReq){ log('WRITE não disponível.','err'); return; }
-  try{
-    if(!str.endsWith('\r')) str = str + '\r'; // muitos comandos Sylvac esperam CR
-    await g.cRemoteReq.writeValueWithoutResponse(new TextEncoder().encode(str));
-    log('Comando (ASCII) enviado: '+JSON.stringify(str));
-  }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
-}
-
-// UI
-document.getElementById('btnConnect').addEventListener('click', connectAndSubscribe);
-document.getElementById('btnDisconnect').addEventListener('click', disconnectNow);
+/* ===== UI bindings ===== */
+document.getElementById('btnConnect').addEventListener('click', connectDevice);
+document.getElementById('btnDisconnect').addEventListener('click', disconnectSelected);
 document.getElementById('btnDisconnectAll').addEventListener('click', disconnectAll);
-document.getElementById('btnReq01').addEventListener('click', ()=>writeCmdHex([0x01]));
-document.getElementById('btnReqR').addEventListener('click', ()=>writeCmdAscii('r'));
-document.getElementById('btnStart').addEventListener('click', ()=>writeCmdHex([0x02]));
-document.getElementById('btnStop').addEventListener('click', ()=>writeCmdHex([0x03]));
 
-// Comandos ASCII
-const cmdInput = document.getElementById('cmdInput');
-const cmdPreset = document.getElementById('cmdPreset');
-document.getElementById('btnSendCmd').addEventListener('click', ()=>{
-  const txt = cmdInput.value.trim();
-  if (txt) writeCmdAscii(txt);
-});
-cmdInput.addEventListener('keydown', (e)=>{
-  if (e.key === 'Enter') { e.preventDefault(); const txt = cmdInput.value.trim(); if (txt) writeCmdAscii(txt); }
-});
-cmdPreset.addEventListener('change', ()=>{
-  const v = cmdPreset.value;
-  if (!v) return;
-  cmdInput.value = v;
-  writeCmdAscii(v);
-  cmdPreset.selectedIndex = 0;
+document.getElementById('btnSendCmd').addEventListener('click', sendAscii);
+document.getElementById('cmdInput').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); sendAscii(); }});
+document.getElementById('cmdPreset').addEventListener('change', e=>{
+  const v=e.target.value; if(!v) return; document.getElementById('cmdInput').value=v; sendAscii(); e.target.selectedIndex=0;
 });
 
-// Alias
 document.getElementById('btnSaveAlias').addEventListener('click', saveAlias);
+selActive.addEventListener('change', ()=>{
+  const s=active(); if(!s) return;
+  document.getElementById('aliasInput').value = s.alias||'';
+});
+
+setPageBadge();
 </script>
 </body>
 </html>
