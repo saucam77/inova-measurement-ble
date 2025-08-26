@@ -3,27 +3,30 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>INOVA BLE → Google Sheets (Sylvac estável)</title>
+<title>INOVA BLE → Google Sheets (Sylvac – comandos ASCII)</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: Arial, sans-serif; padding:16px; line-height:1.45; }
   h1 { margin:0 0 10px; font-size:20px; }
   label { display:block; margin-top:10px; font-weight:600; }
-  input[type="text"] { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; font-size:14px; }
+  input[type="text"], select { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; font-size:14px; }
   .row { display:grid; grid-template-columns:1fr; gap:10px; }
-  @media (min-width:720px){ .row{ grid-template-columns:1fr 1fr; } }
+  @media (min-width:900px){ .row{ grid-template-columns:1fr 1fr; } }
   button { padding:10px 14px; font-size:15px; border-radius:10px; border:0; cursor:pointer; margin-right:8px; margin-top:8px; }
   #btnConnect { background:#0a7; color:#fff; }
   #btnDisconnect { background:#c33; color:#fff; }
+  #btnSendCmd { background:#1464f4; color:#fff; }
   .sec { margin-top:14px; }
   .log { white-space:pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; border-radius:10px; margin-top:14px; max-height:55vh; overflow:auto; }
   .ok{color:#0a8;} .warn{color:#c80;} .err{color:#c00;} .muted{color:#666;font-size:12px;}
   .badge { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef; margin-left:6px; font-size:12px; }
+  .cmdbar { display:grid; grid-template-columns:1fr 160px 140px; gap:10px; align-items:center; }
+  @media (max-width:680px){ .cmdbar{ grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
 <h1>INOVA BLE → Google Sheets <span id="idBadge" class="badge"></span></h1>
-<p class="muted">Conecte instrumentos Sylvac (Web Bluetooth / Chrome Android), receba medições e envie para a planilha.</p>
+<p class="muted">Conecte instrumentos Sylvac (Chrome Android). Receba medições e envie para a planilha. Envie comandos ASCII para o instrumento.</p>
 
 <div class="row">
   <div>
@@ -41,7 +44,7 @@
   </div>
   <div>
     <label><input type="checkbox" id="keepalive" checked> Manter conexão ativa (keep-alive a cada 2s)</label>
-    <label><input type="checkbox" id="autorec" checked> Auto-reconectar no mesmo dispositivo</label>
+    <label><input type="checkbox" id="autorec" checked> Auto-reconectar ao mesmo dispositivo</label>
   </div>
 </div>
 
@@ -54,19 +57,41 @@
   <button id="btnStop">Stop (0x03)</button>
 </div>
 
+<!-- Barra de comandos ASCII -->
+<div class="sec">
+  <label>Comandos ASCII (RemoteReq → RemoteResp)</label>
+  <div class="cmdbar">
+    <input id="cmdInput" type="text" placeholder='Ex.: VER?  (ENTER envia). Sufixo "\r" é adicionado.' />
+    <select id="cmdPreset">
+      <option value="">— Atalhos —</option>
+      <option value="r">r  (Requisitar leitura)</option>
+      <option value="VER?">VER?  (Versão)</option>
+      <option value="ID?">ID?  (Identificação)</option>
+      <option value="SN?">SN?  (Serial)</option>
+      <option value="UNIT?">UNIT?  (Unidade)</option>
+      <option value="TOL?">TOL?  (Tolerância)</option>
+    </select>
+    <button id="btnSendCmd">Enviar comando</button>
+  </div>
+  <div class="muted">As respostas aparecem no log como “RemoteResp texto: …”.</div>
+</div>
+
 <div class="log" id="log"></div>
 
 <script>
 let g = {
   device:null, server:null, svc:null,
-  cNotify:null, cIndicate:null, cWrite:null,
+  cDataSend:null,     // INDICATE (envia medições)
+  cRemoteResp:null,   // NOTIFY   (respostas a comandos)
+  cRemoteReq:null,    // WRITE    (enviar comandos)
   battery:'', label:'', model:'', serial:'',
   keepTimer:null, reconnecting:false
 };
 
+const CCCD_UUID = '00002902-0000-1000-8000-00805f9b34fb';
+
 const logEl = document.getElementById('log');
 const badge = document.getElementById('idBadge');
-
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 function setBadge(txt){ badge.textContent = txt || ''; }
@@ -91,28 +116,32 @@ async function postToSheets(endpoint, payload){
   }catch(e){ log('Falha ao enviar ao GAS: '+e,'warn'); }
 }
 
-function onValue(ev){
+function handleValueFrom(charRole, ev){
   const dv=ev.target.value;
   const parsed=decodeSylvac(dv);
   const rawHex=toHex(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+  const who = (charRole==='data' ? 'DataSend' : 'RemoteResp');
+  log(`${who} texto: "`+parsed.rawText+'"', 'muted');
 
-  log('Texto: "'+parsed.rawText+'"', 'muted');
-
-  const payload={
-    deviceName: g.label || (g.device?.name||''),
-    deviceId: g.device?.id || '',
-    model: g.model || '',
-    serial: g.serial || '',
-    value: parsed.value,
-    unit: parsed.unit,
-    status: parsed.status,
-    battery: g.battery,
-    rawHex
-  };
-  log('Leitura: '+JSON.stringify(payload),'ok');
-
-  const endpoint=document.getElementById('endpoint').value.trim();
-  if(endpoint) postToSheets(endpoint,payload);
+  // Só envia à planilha se for leitura numérica (medição)
+  if (charRole==='data' && !Number.isNaN(parsed.value)) {
+    const stableId = (g.serial && ('SN:'+g.serial)) || (g.model && ('MODEL:'+g.model)) || (g.device?.name||'');
+    const payload={
+      deviceName: g.label || (g.device?.name||''),
+      deviceId: stableId,                 // ID estável (MODEL/SN)
+      chromeDeviceId: g.device?.id || '', // id opaco do Chrome (referência)
+      model: g.model || '',
+      serial: g.serial || '',
+      value: parsed.value,
+      unit: parsed.unit,
+      status: parsed.status,
+      battery: g.battery,
+      rawHex
+    };
+    log('Leitura: '+JSON.stringify(payload),'ok');
+    const endpoint=document.getElementById('endpoint').value.trim();
+    if(endpoint) postToSheets(endpoint,payload);
+  }
 }
 
 async function readDIS(){
@@ -148,61 +177,66 @@ function startKeepAlive(){
   g.keepTimer = setInterval(async () => {
     try{
       if (g?.server?.connected) {
-        if (g.cWrite) {
-          await g.cWrite.writeValueWithoutResponse(Uint8Array.from([0x01])); // ping leve
+        if (g.cRemoteReq) {
+          await g.cRemoteReq.writeValueWithoutResponse(Uint8Array.from([0x01])); // ping leve
         } else {
-          // alternativo: reler bateria para evitar sono
           const bs=await g.server.getPrimaryService('battery_service').catch(()=>null);
-          if (bs) {
-            const bc=await bs.getCharacteristic('battery_level').catch(()=>null);
-            if (bc) await bc.readValue();
-          }
+          if (bs) { const bc=await bs.getCharacteristic('battery_level').catch(()=>null); if (bc) await bc.readValue(); }
         }
       }
     }catch(_){ /* silencioso */ }
   }, 2000);
 }
 
+async function enableCccd(characteristic, enableValue){
+  try{
+    const cccd = await characteristic.getDescriptor('00002902-0000-1000-8000-00805f9b34fb');
+    await cccd.writeValue(Uint8Array.of(enableValue, 0x00));
+  }catch(_){ /* alguns stacks já fazem via startNotifications */ }
+}
+
 async function setupServiceAndChars(SVC){
   g.svc = await g.server.getPrimaryService(SVC);
 
   const chars = await g.svc.getCharacteristics();
-  g.cNotify = null; g.cIndicate = null; g.cWrite = null;
+  g.cDataSend = null; g.cRemoteResp = null; g.cRemoteReq = null;
 
   for (const c of chars) {
     const p = c.properties || {};
-    if (!g.cNotify   && p.notify)                 g.cNotify = c;
-    if (!g.cIndicate && p.indicate)               g.cIndicate = c;
-    if (!g.cWrite    && (p.writeWithoutResponse || p.write)) g.cWrite = c;
+    if (!g.cDataSend   && p.indicate)                 g.cDataSend = c;             // DataSend
+    if (!g.cRemoteResp && p.notify)                   g.cRemoteResp = c;           // RemoteResp
+    if (!g.cRemoteReq  && (p.writeWithoutResponse || p.write)) g.cRemoteReq = c;   // RemoteReq
   }
 
-  if (g.cNotify) {
-    await g.cNotify.startNotifications();
-    g.cNotify.addEventListener('characteristicvaluechanged', onValue);
-    log('NOTIFY assinada ('+g.cNotify.uuid+'). Gere uma medida…','ok');
+  if (g.cDataSend) {
+    await g.cDataSend.startNotifications();
+    await enableCccd(g.cDataSend, 0x02); // 0x02 = Indications
+    g.cDataSend.addEventListener('characteristicvaluechanged', e=>handleValueFrom('data',e));
+    log('DataSend (INDICATE) assinada ('+g.cDataSend.uuid+'). Gere uma medida…','ok');
   } else {
-    log('Characteristic NOTIFY não encontrada.','warn');
+    log('Characteristic DataSend (INDICATE) não encontrada.','warn');
   }
 
-  if (g.cIndicate) {
-    await g.cIndicate.startNotifications();
-    g.cIndicate.addEventListener('characteristicvaluechanged', onValue);
-    log('INDICATE assinada ('+g.cIndicate.uuid+').','ok');
+  if (g.cRemoteResp) {
+    await g.cRemoteResp.startNotifications();
+    await enableCccd(g.cRemoteResp, 0x01); // 0x01 = Notifications
+    g.cRemoteResp.addEventListener('characteristicvaluechanged', e=>handleValueFrom('resp',e));
+    log('RemoteResp (NOTIFY) assinada ('+g.cRemoteResp.uuid+').','ok');
   }
 
-  if (g.cWrite) log('WRITE disponível ('+g.cWrite.uuid+').','ok');
-  else log('Characteristic WRITE não encontrada.','warn');
+  if (g.cRemoteReq) log('RemoteReq (WRITE) disponível ('+g.cRemoteReq.uuid+').','ok');
+  else log('Characteristic RemoteReq (WRITE) não encontrada.','warn');
 
   startKeepAlive();
 }
 
 async function connectFlow(device){
   g.device = device;
-  log(`Selecionado: ${device.name||'(sem nome)'} — ID: ${device.id}`);
+  log(`Selecionado: ${device.name||'(sem nome)'} — ID Chrome: ${device.id}`);
 
   g.server = await device.gatt.connect();
 
-  // bateria (opcional)
+  // Bateria (opcional)
   g.battery='';
   if (document.getElementById('battery').checked) {
     try{
@@ -239,10 +273,7 @@ async function connectAndSubscribe(){
   try{
     const SVC=document.getElementById('svc').value.trim();
     if(!navigator.bluetooth){ log('Web Bluetooth não suportado (use Chrome no Android).','err'); return; }
-
-    // Descoberta genérica, mas pedindo os serviços necessários
     const opts = { acceptAllDevices:true, optionalServices:[SVC,'battery_service','device_information'] };
-
     log('Procurando dispositivo BLE…');
     const device = await navigator.bluetooth.requestDevice(opts);
     if(!device) throw new Error('Seleção cancelada.');
@@ -254,31 +285,58 @@ async function connectAndSubscribe(){
 
 function disconnectNow(){
   try{
-    document.getElementById('autorec').checked = false; // evita reconectar
+    document.getElementById('autorec').checked = false;
     clearInterval(g.keepTimer);
     if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
-    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null,
+    g = { device:null, server:null, svc:null, cDataSend:null, cRemoteResp:null, cRemoteReq:null,
           battery:'', label:'', model:'', serial:'', keepTimer:null, reconnecting:false };
     setBadge('');
     log('Conexão encerrada.','warn');
   }catch(e){ log('Falha ao desconectar: '+e,'err'); }
 }
 
-async function writeCmd(bytes){
-  if(!g.cWrite){ log('WRITE não disponível.','err'); return; }
+async function writeCmdHex(bytes){
+  if(!g.cRemoteReq){ log('WRITE não disponível.','err'); return; }
   try{
-    await g.cWrite.writeValueWithoutResponse(new Uint8Array(bytes));
-    log('Comando enviado: '+bytes.map(b=>'0x'+b.toString(16).padStart(2,'0')).join(' '));
+    await g.cRemoteReq.writeValueWithoutResponse(new Uint8Array(bytes));
+    log('Comando (hex) enviado: '+bytes.map(b=>'0x'+b.toString(16).padStart(2,'0')).join(' '));
   }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
 }
 
-// UI
+async function writeCmdAscii(str){
+  if(!g.cRemoteReq){ log('WRITE não disponível.','err'); return; }
+  try{
+    if(!str.endsWith('\r')) str = str + '\r'; // muitos comandos Sylvac esperam CR
+    await g.cRemoteReq.writeValueWithoutResponse(new TextEncoder().encode(str));
+    log('Comando (ASCII) enviado: '+JSON.stringify(str));
+  }catch(e){ log('Falha ao enviar comando: '+e,'err'); }
+}
+
+// UI – botões básicos
 document.getElementById('btnConnect').addEventListener('click', connectAndSubscribe);
 document.getElementById('btnDisconnect').addEventListener('click', disconnectNow);
-document.getElementById('btnReq01').addEventListener('click', ()=>writeCmd([0x01]));
-document.getElementById('btnReqR').addEventListener('click', ()=>writeCmd([0x72]));  // 'r'
-document.getElementById('btnStart').addEventListener('click', ()=>writeCmd([0x02]));
-document.getElementById('btnStop').addEventListener('click', ()=>writeCmd([0x03]));
+document.getElementById('btnReq01').addEventListener('click', ()=>writeCmdHex([0x01]));
+document.getElementById('btnReqR').addEventListener('click', ()=>writeCmdAscii('r'));
+document.getElementById('btnStart').addEventListener('click', ()=>writeCmdHex([0x02]));
+document.getElementById('btnStop').addEventListener('click', ()=>writeCmdHex([0x03]));
+
+// UI – barra de comandos ASCII
+const cmdInput = document.getElementById('cmdInput');
+const cmdPreset = document.getElementById('cmdPreset');
+document.getElementById('btnSendCmd').addEventListener('click', ()=>{
+  const txt = cmdInput.value.trim();
+  if (txt) writeCmdAscii(txt);
+});
+cmdInput.addEventListener('keydown', (e)=>{
+  if (e.key === 'Enter') { e.preventDefault(); const txt = cmdInput.value.trim(); if (txt) writeCmdAscii(txt); }
+});
+cmdPreset.addEventListener('change', ()=>{
+  const v = cmdPreset.value;
+  if (!v) return;
+  cmdInput.value = v;
+  writeCmdAscii(v);
+  cmdPreset.selectedIndex = 0;
+});
 </script>
 </body>
 </html>
