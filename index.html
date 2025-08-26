@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BLE GATT → Google Sheets (MVP)</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; }
+    button { padding: 12px 16px; font-size: 16px; }
+    .log { white-space: pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; margin-top:12px; }
+    label { display:block; margin-top:10px; }
+    input { width:100%; padding:8px; }
+    .ok { color: #0a8; }
+    .warn { color: #c80; }
+    .err { color: #c00; }
+  </style>
+</head>
+<body>
+  <h1>BLE GATT → Google Sheets (MVP)</h1>
+
+  <label>GAS_ENDPOINT (Web App URL)</label>
+  <input id="endpoint" value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec" />
+
+  <label>Service UUID (medição)</label>
+  <input id="svc" value="c1b25000-caaf-6d0e-4c33-7dae30052840" />
+
+  <label>Characteristic UUID (medição)</label>
+  <input id="chr" value="c1b25013-caaf-6d0e-4c33-7dae30052840" />
+
+  <label><input type="checkbox" id="battery" checked /> Ler nível de bateria (0x180F/0x2A19)</label>
+
+  <button id="btn">Conectar & Assinar</button>
+
+  <div class="log" id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(msg, cls='') {
+  const p = document.createElement('div');
+  p.textContent = msg;
+  if (cls) p.className = cls;
+  logEl.appendChild(p);
+}
+
+function toHex(u8) {
+  return Array.from(u8).map(b => b.toString(16).padStart(2,'0')).join(' ');
+}
+
+// Decodificador para Sylvac: tenta ASCII "valor;unidade;status"
+// Ex.: "12.345;mm;OK" → { value:12.345, unit:"mm", status:"OK" }
+function decodeValue(dataView) {
+  const u8 = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+  const txt = new TextDecoder('utf-8').decode(u8).trim();
+
+  // tenta padrão clássico Sylvac
+  const parts = txt.split(/[;,\t ]+/).filter(Boolean);
+  if (parts.length >= 1) {
+    let value = NaN, unit = '', status = '';
+
+    // primeiro campo: número
+    const numMatch = parts[0].replace(',', '.').match(/^[-+]?\d*\.?\d+$/);
+    if (numMatch) value = parseFloat(numMatch[0]);
+
+    // segundo campo (se houver): unidade
+    if (parts[1] && /^[a-zA-Zµ°]+$/.test(parts[1])) unit = parts[1];
+
+    // terceiro campo (se houver): status
+    if (parts[2] && /^(OK|NG|PASS|FAIL)$/i.test(parts[2])) status = parts[2].toUpperCase();
+
+    if (!isNaN(value)) return { value, unit, status, rawText: txt };
+  }
+
+  // fallback: regex de número dentro do texto
+  const m = txt.match(/-?\d+[.,]?\d*/);
+  if (m) return { value: parseFloat(m[0].replace(',', '.')), unit:'', status:'', rawText: txt };
+
+  // fallback bruto
+  if (dataView.byteLength >= 4) {
+    try {
+      const f32 = dataView.getFloat32(0, true);
+      return { value: f32, unit:'', status:'', rawText: '' };
+    } catch(_) {}
+  }
+  return { value: NaN, unit:'', status:'', rawText: txt };
+}
+
+async function postToSheets(endpoint, payload) {
+  try {
+    await fetch(endpoint, {
+      method: 'POST',
+      mode: 'no-cors', // simplifica CORS no MVP
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    log('Falha ao enviar ao GAS: ' + e, 'warn');
+  }
+}
+
+document.getElementById('btn').addEventListener('click', async () => {
+  try {
+    const GAS_ENDPOINT = document.getElementById('endpoint').value.trim();
+    const MEAS_SERVICE_UUID = document.getElementById('svc').value.trim();
+    const MEAS_CHAR_UUID = document.getElementById('chr').value.trim();
+    const READ_BATTERY = document.getElementById('battery').checked;
+
+    if (!navigator.bluetooth) {
+      log('Web Bluetooth não suportado neste navegador.', 'err');
+      return;
+    }
+
+    log('Solicitando dispositivo BLE…');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [MEAS_SERVICE_UUID] }],
+      optionalServices: ['battery_service', 'device_information']
+    });
+
+    log('Conectando GATT…');
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(MEAS_SERVICE_UUID);
+    const characteristic = await service.getCharacteristic(MEAS_CHAR_UUID);
+
+    let batteryPct = '';
+    if (READ_BATTERY) {
+      try {
+        const battSvc = await server.getPrimaryService('battery_service');
+        const battChar = await battSvc.getCharacteristic('battery_level');
+        const battVal = await battChar.readValue();
+        batteryPct = battVal.getUint8(0);
+        log(`Bateria: ${batteryPct}%`, 'ok');
+      } catch (e) {
+        log('Battery service indisponível (seguindo sem).', 'warn');
+      }
+    }
+
+    log('Assinando notifications… (gere uma medida no instrumento)');
+    await characteristic.startNotifications();
+
+    characteristic.addEventListener('characteristicvaluechanged', async (ev) => {
+      const dv = ev.target.value;
+      const parsed = decodeValue(dv);
+      const rawHex = toHex(new Uint8Array(dv.buffer));
+      const payload = {
+        deviceName: device.name || '',
+        deviceId: device.id || '',
+        value: parsed.value,
+        unit: parsed.unit,
+        status: parsed.status,
+        battery: batteryPct,
+        rawHex: rawHex
+      };
+      log(`Leitura: ${JSON.stringify(payload)}`, 'ok');
+      if (GAS_ENDPOINT) await postToSheets(GAS_ENDPOINT, payload);
+    });
+
+    device.addEventListener('gattserverdisconnected', () => {
+      log('Desconectado. Reabra a página para novo teste.', 'warn');
+    });
+
+  } catch (e) {
+    log('Erro: ' + e, 'err');
+  }
+});
+</script>
+</body>
+</html>
