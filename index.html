@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>BLE GATT → Google Sheets (MVP Sylvac)</title>
+<title>BLE GATT → Google Sheets (Sylvac c/ Auto-Reconnect)</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: Arial, sans-serif; padding:16px; line-height:1.45; }
@@ -38,6 +38,10 @@
     <label><input type="checkbox" id="battery" checked> Ler nível de bateria (0x180F/0x2A19)</label>
     <div class="muted">Dica: mantenha o instrumento “acordado” (aperte o botão) antes de conectar.</div>
   </div>
+  <div>
+    <label><input type="checkbox" id="keepalive" checked> Manter conexão ativa (keep-alive a cada 3s)</label>
+    <label><input type="checkbox" id="autorec" checked> Auto-reconectar ao desconectar</label>
+  </div>
 </div>
 
 <div class="sec">
@@ -52,7 +56,12 @@
 <div class="log" id="log"></div>
 
 <script>
-let g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'', deviceLabel:'' };
+let g = {
+  device:null, server:null, svc:null,
+  cNotify:null, cIndicate:null, cWrite:null,
+  battery:'', deviceLabel:'',
+  keepTimer:null, reconnecting:false
+};
 
 const logEl = document.getElementById('log');
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
@@ -61,7 +70,7 @@ function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0'))
 // === Parser Sylvac: "+014.736 >" → value=14.736, unit=mm, status=NG ===
 function decodeSylvac(dv){
   const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  const printable = u8.filter(b => b>=0x20 && b<=0x7E); // 0x20..0x7E
+  const printable = u8.filter(b => b>=0x20 && b<=0x7E);
   const txt = new TextDecoder('utf-8').decode(printable).trim();
 
   let value = NaN, unit='mm', status='OK';
@@ -83,7 +92,6 @@ function onValue(ev){
   const parsed=decodeSylvac(dv);
   const rawHex=toHex(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
 
-  // debug do texto ASCII
   log('Texto: "'+parsed.rawText+'"', 'muted');
 
   const payload={
@@ -102,11 +110,9 @@ function onValue(ev){
 }
 
 async function readDISLabel(){
-  // Lê serial/model do Device Information Service para nome estável
   g.deviceLabel = g.device?.name || '';
   try{
     const dis = await g.server.getPrimaryService('device_information');
-
     async function readStr(uuid){
       try{
         const c = await dis.getCharacteristic(uuid);
@@ -114,11 +120,10 @@ async function readDISLabel(){
         return new TextDecoder('utf-8').decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).trim();
       }catch{ return ''; }
     }
-
-    const serial = await readStr('serial_number_string');      // 0x2A25
-    const model  = await readStr('model_number_string');       // 0x2A24
-    const fw     = await readStr('firmware_revision_string');  // 0x2A26
-    const mfg    = await readStr('manufacturer_name_string');  // 0x2A29
+    const serial = await readStr('serial_number_string');
+    const model  = await readStr('model_number_string');
+    const fw     = await readStr('firmware_revision_string');
+    const mfg    = await readStr('manufacturer_name_string');
 
     g.deviceLabel = serial || model || g.deviceLabel;
     log(`DIS: serial=${serial||'-'} model=${model||'-'} fw=${fw||'-'} mfg=${mfg||'-'}`, 'muted');
@@ -127,18 +132,106 @@ async function readDISLabel(){
   }
 }
 
+function startKeepAlive(){
+  clearInterval(g.keepTimer);
+  if (!document.getElementById('keepalive').checked) return;
+  g.keepTimer = setInterval(async () => {
+    try{
+      if (g?.server?.connected) {
+        if (g.cWrite) {
+          // pedido leve de leitura
+          await g.cWrite.writeValueWithoutResponse(Uint8Array.from([0x01]));
+        } else if (g.battery !== '') {
+          // alternativa: reler bateria ocasionalmente
+          const bs=await g.server.getPrimaryService('battery_service');
+          const bc=await bs.getCharacteristic('battery_level');
+          await bc.readValue();
+        }
+      }
+    }catch(_){} // silencioso
+  }, 3000);
+}
+
+async function setupServiceAndChars(SVC){
+  g.svc = await g.server.getPrimaryService(SVC);
+  const chars = await g.svc.getCharacteristics();
+  g.cNotify = null; g.cIndicate = null; g.cWrite = null;
+
+  for (const c of chars) {
+    const p = c.properties || {};
+    if (!g.cNotify   && p.notify)                 g.cNotify = c;
+    if (!g.cIndicate && p.indicate)               g.cIndicate = c;
+    if (!g.cWrite    && (p.writeWithoutResponse || p.write)) g.cWrite = c;
+  }
+
+  if (g.cNotify) {
+    await g.cNotify.startNotifications();
+    g.cNotify.addEventListener('characteristicvaluechanged', onValue);
+    log('NOTIFY assinada ('+g.cNotify.uuid+'). Gere uma medida…','ok');
+  } else {
+    log('Characteristic NOTIFY não encontrada.','warn');
+  }
+
+  if (g.cIndicate) {
+    await g.cIndicate.startNotifications();
+    g.cIndicate.addEventListener('characteristicvaluechanged', onValue);
+    log('INDICATE assinada ('+g.cIndicate.uuid+').','ok');
+  }
+
+  if (g.cWrite) log('WRITE disponível ('+g.cWrite.uuid+').','ok');
+  else log('Characteristic WRITE não encontrada.','warn');
+
+  startKeepAlive();
+}
+
+async function connectFlow(device){
+  g.device = device;
+  log(`Selecionado: ${device.name||'(sem nome)'} — ID: ${device.id}`);
+  g.server = await device.gatt.connect();
+
+  // bateria (opcional)
+  g.battery='';
+  if (document.getElementById('battery').checked) {
+    try{
+      const bs=await g.server.getPrimaryService('battery_service');
+      const bc=await bs.getCharacteristic('battery_level');
+      g.battery=(await bc.readValue()).getUint8(0);
+      log(`Bateria: ${g.battery}%`,'ok');
+    }catch{ log('Battery service indisponível.','warn'); }
+  }
+
+  await readDISLabel();
+  await setupServiceAndChars(document.getElementById('svc').value.trim());
+
+  device.addEventListener('gattserverdisconnected', async () => {
+    log('Desconectado.','warn');
+    clearInterval(g.keepTimer);
+    if (document.getElementById('autorec').checked && !g.reconnecting) {
+      g.reconnecting = true;
+      try{
+        log('Tentando reconectar…','muted');
+        await device.gatt.connect();
+        g.reconnecting = false;
+        log('Reconectado.','ok');
+        await setupServiceAndChars(document.getElementById('svc').value.trim());
+      } catch {
+        g.reconnecting = false;
+        log('Falha ao reconectar. Toque em “Conectar & Assinar”.','warn');
+      }
+    }
+  });
+}
+
 async function connectAndSubscribe(){
   try{
     const SVC=document.getElementById('svc').value.trim();
-    const READ_BATT=document.getElementById('battery').checked;
-
     if(!navigator.bluetooth){ log('Web Bluetooth não suportado (use Chrome no Android).','err'); return; }
 
-    // Descoberta: tenta por prefixo 'SY' e fallback acceptAllDevices
     const REQS=[
       { filters:[{namePrefix:'SY'}], optionalServices:[SVC,'battery_service','device_information'] },
       { acceptAllDevices:true, optionalServices:[SVC,'battery_service','device_information'] }
     ];
+
     let device=null;
     for(const opt of REQS){
       try{ log('Procurando dispositivo BLE…'); device=await navigator.bluetooth.requestDevice(opt); if(device) break; }
@@ -146,60 +239,7 @@ async function connectAndSubscribe(){
     }
     if(!device) throw new Error('Não foi possível selecionar o dispositivo.');
 
-    g.device=device; log(`Selecionado: ${device.name||'(sem nome)'} — ID: ${device.id}`);
-
-    // Conecta
-    g.server=await device.gatt.connect();
-
-    // Bateria (opcional)
-    g.battery='';
-    if(READ_BATT){
-      try{
-        const bs=await g.server.getPrimaryService('battery_service');
-        const bc=await bs.getCharacteristic('battery_level');
-        g.battery=(await bc.readValue()).getUint8(0);
-        log(`Bateria: ${g.battery}%`,'ok');
-      }catch{ log('Battery service indisponível.','warn'); }
-    }
-
-    // Lê serial/model para rótulo estável
-    await readDISLabel();
-
-    // Serviço de medição
-    g.svc = await g.server.getPrimaryService(SVC);
-
-    // === Descoberta dinâmica das characteristics dentro do serviço ===
-    const chars = await g.svc.getCharacteristics();
-    g.cNotify = null; g.cIndicate = null; g.cWrite = null;
-
-    for (const c of chars) {
-      const p = c.properties || {};
-      if (!g.cNotify   && p.notify)                 g.cNotify = c;
-      if (!g.cIndicate && p.indicate)               g.cIndicate = c;
-      if (!g.cWrite    && (p.writeWithoutResponse || p.write)) g.cWrite = c;
-    }
-
-    // Assina notify/indicate
-    if (g.cNotify) {
-      await g.cNotify.startNotifications();
-      g.cNotify.addEventListener('characteristicvaluechanged', onValue);
-      log('NOTIFY assinada ('+g.cNotify.uuid+'). Gere uma medida…','ok');
-    } else {
-      log('Characteristic NOTIFY não encontrada.','warn');
-    }
-    if (g.cIndicate) {
-      await g.cIndicate.startNotifications(); // WebBluetooth usa mesma API para indicate
-      g.cIndicate.addEventListener('characteristicvaluechanged', onValue);
-      log('INDICATE assinada ('+g.cIndicate.uuid+').','ok');
-    }
-
-    if (g.cWrite) {
-      log('WRITE disponível ('+g.cWrite.uuid+').','ok');
-    } else {
-      log('Characteristic WRITE não encontrada.','warn');
-    }
-
-    g.device.addEventListener('gattserverdisconnected', ()=>log('Desconectado.','warn'));
+    await connectFlow(device);
   }catch(e){
     log('Erro: '+e,'err');
   }
@@ -207,8 +247,10 @@ async function connectAndSubscribe(){
 
 function disconnectNow(){
   try{
+    document.getElementById('autorec').checked = false; // evita reconectar
+    clearInterval(g.keepTimer);
     if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
-    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'', deviceLabel:'' };
+    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'', deviceLabel:'', keepTimer:null, reconnecting:false };
     log('Conexão encerrada.','warn');
   }catch(e){ log('Falha ao desconectar: '+e,'err'); }
 }
@@ -224,10 +266,10 @@ async function writeCmd(bytes){
 // UI
 document.getElementById('btnConnect').addEventListener('click', connectAndSubscribe);
 document.getElementById('btnDisconnect').addEventListener('click', disconnectNow);
-document.getElementById('btnReq01').addEventListener('click', ()=>writeCmd([0x01])); // hipótese comum
+document.getElementById('btnReq01').addEventListener('click', ()=>writeCmd([0x01]));
 document.getElementById('btnReqR').addEventListener('click', ()=>writeCmd([0x72]));  // 'r'
-document.getElementById('btnStart').addEventListener('click', ()=>writeCmd([0x02])); // start (se suportado)
-document.getElementById('btnStop').addEventListener('click', ()=>writeCmd([0x03]));  // stop (se suportado)
+document.getElementById('btnStart').addEventListener('click', ()=>writeCmd([0x02]));
+document.getElementById('btnStop').addEventListener('click', ()=>writeCmd([0x03]));
 </script>
 </body>
 </html>
