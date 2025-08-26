@@ -5,32 +5,49 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BLE GATT → Google Sheets (MVP)</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 16px; }
-    button { padding: 12px 16px; font-size: 16px; }
-    .log { white-space: pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; margin-top:12px; }
-    label { display:block; margin-top:10px; }
-    input { width:100%; padding:8px; }
+    :root { color-scheme: light dark; }
+    body { font-family: Arial, sans-serif; padding: 16px; line-height: 1.45; }
+    h1 { margin: 0 0 10px; font-size: 20px; }
+    label { display:block; margin-top:10px; font-weight: 600; }
+    input[type="text"] { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; font-size:14px; }
+    .row { display:grid; grid-template-columns: 1fr; gap:10px; }
+    @media (min-width: 720px) { .row { grid-template-columns: 1fr 1fr; } }
+    button { padding:12px 16px; font-size:16px; border-radius:10px; border:0; cursor:pointer; }
+    button#btn { background:#0a7; color:#fff; }
+    .log { white-space: pre-wrap; background:#f8f8f8; padding:12px; border:1px solid #ddd; border-radius:10px; margin-top:14px; max-height: 50vh; overflow:auto; }
     .ok { color: #0a8; }
     .warn { color: #c80; }
     .err { color: #c00; }
+    .muted { color:#666; font-size: 12px; }
   </style>
 </head>
 <body>
   <h1>BLE GATT → Google Sheets (MVP)</h1>
+  <p class="muted">Teste de conexão BLE (Sylvac) via Web Bluetooth no Android/Chrome. Depois de conectar, pressione o botão de medir no instrumento.</p>
 
-  <label>GAS_ENDPOINT (Web App URL)</label>
-  <input id="endpoint" value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec" />
+  <div class="row">
+    <div>
+      <label for="endpoint">GAS_ENDPOINT (URL do Apps Script)</label>
+      <input type="text" id="endpoint" autocomplete="off"
+        value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec" />
+    </div>
+    <div>
+      <label for="svc">Service UUID (medição)</label>
+      <input type="text" id="svc" autocomplete="off"
+        value="c1b25000-caaf-6d0e-4c33-7dae30052840" />
+    </div>
+    <div>
+      <label for="chr">Characteristic UUID (medição)</label>
+      <input type="text" id="chr" autocomplete="off"
+        value="c1b25013-caaf-6d0e-4c33-7dae30052840" />
+    </div>
+    <div>
+      <label><input type="checkbox" id="battery" checked /> Ler nível de bateria (0x180F/0x2A19)</label>
+      <div class="muted">Dica: mantenha o instrumento “acordado” (aperte o botão) antes de conectar.</div>
+    </div>
+  </div>
 
-  <label>Service UUID (medição)</label>
-  <input id="svc" value="c1b25000-caaf-6d0e-4c33-7dae30052840" />
-
-  <label>Characteristic UUID (medição)</label>
-  <input id="chr" value="c1b25013-caaf-6d0e-4c33-7dae30052840" />
-
-  <label><input type="checkbox" id="battery" checked /> Ler nível de bateria (0x180F/0x2A19)</label>
-
-  <button id="btn">Conectar & Assinar</button>
-
+  <p><button id="btn">Conectar & Assinar</button></p>
   <div class="log" id="log"></div>
 
 <script>
@@ -40,48 +57,51 @@ function log(msg, cls='') {
   p.textContent = msg;
   if (cls) p.className = cls;
   logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
 function toHex(u8) {
   return Array.from(u8).map(b => b.toString(16).padStart(2,'0')).join(' ');
 }
 
-// Decodificador para Sylvac: tenta ASCII "valor;unidade;status"
-// Ex.: "12.345;mm;OK" → { value:12.345, unit:"mm", status:"OK" }
+// Decodifica payload Sylvac (tenta ASCII "valor;unidade;status"; ex: "12.345;mm;OK")
 function decodeValue(dataView) {
-  const u8 = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
-  const txt = new TextDecoder('utf-8').decode(u8).trim();
+  try {
+    const u8 = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+    const txt = new TextDecoder('utf-8').decode(u8).trim();
 
-  // tenta padrão clássico Sylvac
-  const parts = txt.split(/[;,\t ]+/).filter(Boolean);
-  if (parts.length >= 1) {
-    let value = NaN, unit = '', status = '';
+    // Padrões comuns: "12.345;mm;OK" | "12,345 mm OK" | "12.345"
+    const parts = txt.split(/[;,\t ]+/).filter(Boolean);
+    if (parts.length >= 1) {
+      let value = NaN, unit = '', status = '';
 
-    // primeiro campo: número
-    const numMatch = parts[0].replace(',', '.').match(/^[-+]?\d*\.?\d+$/);
-    if (numMatch) value = parseFloat(numMatch[0]);
+      // 1º campo: número
+      const num = parts[0].replace(',', '.');
+      if (/^[-+]?\d*\.?\d+$/.test(num)) value = parseFloat(num);
 
-    // segundo campo (se houver): unidade
-    if (parts[1] && /^[a-zA-Zµ°]+$/.test(parts[1])) unit = parts[1];
+      // 2º campo: unidade (opcional)
+      if (parts[1] && /^[a-zA-Zµ°]+$/.test(parts[1])) unit = parts[1];
 
-    // terceiro campo (se houver): status
-    if (parts[2] && /^(OK|NG|PASS|FAIL)$/i.test(parts[2])) status = parts[2].toUpperCase();
+      // 3º campo: status (opcional)
+      if (parts[2] && /^(OK|NG|PASS|FAIL)$/i.test(parts[2])) status = parts[2].toUpperCase();
 
-    if (!isNaN(value)) return { value, unit, status, rawText: txt };
-  }
+      if (!isNaN(value)) return { value, unit, status, rawText: txt };
+    }
 
-  // fallback: regex de número dentro do texto
-  const m = txt.match(/-?\d+[.,]?\d*/);
-  if (m) return { value: parseFloat(m[0].replace(',', '.')), unit:'', status:'', rawText: txt };
+    // Fallback: primeiro número encontrado
+    const m = txt.match(/-?\d+[.,]?\d*/);
+    if (m) return { value: parseFloat(m[0].replace(',', '.')), unit:'', status:'', rawText: txt };
 
-  // fallback bruto
-  if (dataView.byteLength >= 4) {
-    try {
+    // Fallback binário: tenta float32 little-endian
+    if (dataView.byteLength >= 4) {
       const f32 = dataView.getFloat32(0, true);
       return { value: f32, unit:'', status:'', rawText: '' };
-    } catch(_) {}
+    }
+
+    return { value: NaN, unit:'', status:'', rawText: txt };
+  } catch (e) {
+    return { value: NaN, unit:'', status:'', rawText: '' };
   }
-  return { value: NaN, unit:'', status:'', rawText: txt };
 }
 
 async function postToSheets(endpoint, payload) {
@@ -105,21 +125,39 @@ document.getElementById('btn').addEventListener('click', async () => {
     const READ_BATTERY = document.getElementById('battery').checked;
 
     if (!navigator.bluetooth) {
-      log('Web Bluetooth não suportado neste navegador.', 'err');
+      log('Web Bluetooth não suportado neste navegador. Use Chrome no Android com Bluetooth e Localização ativados.', 'err');
+      return;
+    }
+    if (!GAS_ENDPOINT || !MEAS_SERVICE_UUID || !MEAS_CHAR_UUID) {
+      log('Preencha endpoint e UUIDs.', 'err');
       return;
     }
 
-    log('Solicitando dispositivo BLE…');
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [MEAS_SERVICE_UUID] }],
-      optionalServices: ['battery_service', 'device_information']
-    });
+    // Algumas vezes o advertisement não expõe o Service UUID → tentamos primeiro por nome "SY*",
+    // depois aceitamos qualquer dispositivo e buscamos o serviço pelo UUID após conectar.
+    const REQUEST_OPTS = [
+      { filters: [{ namePrefix: 'SY' }], optionalServices: [MEAS_SERVICE_UUID, 'battery_service', 'device_information'] },
+      { acceptAllDevices: true, optionalServices: [MEAS_SERVICE_UUID, 'battery_service', 'device_information'] }
+    ];
+
+    let device = null;
+    for (const opt of REQUEST_OPTS) {
+      try {
+        log('Procurando dispositivo BLE…');
+        device = await navigator.bluetooth.requestDevice(opt);
+        if (device) break;
+      } catch (e) {
+        log('Tentativa de descoberta falhou, tentando outra estratégia…', 'warn');
+      }
+    }
+    if (!device) throw new Error('Não foi possível encontrar o dispositivo');
+
+    log(`Selecionado: ${device.name || '(sem nome)'} — ID: ${device.id}`);
 
     log('Conectando GATT…');
     const server = await device.gatt.connect();
-    const service = await server.getPrimaryService(MEAS_SERVICE_UUID);
-    const characteristic = await service.getCharacteristic(MEAS_CHAR_UUID);
 
+    // Opcional: ler bateria (0x180F / 0x2A19)
     let batteryPct = '';
     if (READ_BATTERY) {
       try {
@@ -133,6 +171,10 @@ document.getElementById('btn').addEventListener('click', async () => {
       }
     }
 
+    // Serviço e characteristic de medição (Sylvac)
+    const service = await server.getPrimaryService(MEAS_SERVICE_UUID);
+    const characteristic = await service.getCharacteristic(MEAS_CHAR_UUID);
+
     log('Assinando notifications… (gere uma medida no instrumento)');
     await characteristic.startNotifications();
 
@@ -140,6 +182,7 @@ document.getElementById('btn').addEventListener('click', async () => {
       const dv = ev.target.value;
       const parsed = decodeValue(dv);
       const rawHex = toHex(new Uint8Array(dv.buffer));
+
       const payload = {
         deviceName: device.name || '',
         deviceId: device.id || '',
@@ -149,7 +192,9 @@ document.getElementById('btn').addEventListener('click', async () => {
         battery: batteryPct,
         rawHex: rawHex
       };
+
       log(`Leitura: ${JSON.stringify(payload)}`, 'ok');
+
       if (GAS_ENDPOINT) await postToSheets(GAS_ENDPOINT, payload);
     });
 
