@@ -31,20 +31,8 @@
       value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec">
   </div>
   <div>
-    <label>Service UUID (medição)</label>
+    <label>Service UUID (Sylvac – medição)</label>
     <input type="text" id="svc" value="c1b25000-caaf-6d0e-4c33-7dae30052840">
-  </div>
-  <div>
-    <label>Characteristic UUID (NOTIFY)</label>
-    <input type="text" id="chrNotify" value="c1b25013-caaf-6d0e-4c33-7dae30052840">
-  </div>
-  <div>
-    <label>Characteristic UUID (INDICATE)</label>
-    <input type="text" id="chrIndicate" value="c1b25010-caaf-6d0e-4c33-7dae30052840">
-  </div>
-  <div>
-    <label>Characteristic UUID (WRITE)</label>
-    <input type="text" id="chrWrite" value="c1b25012-caaf-6d0e-4c33-7dae30052840">
   </div>
   <div>
     <label><input type="checkbox" id="battery" checked> Ler nível de bateria (0x180F/0x2A19)</label>
@@ -64,20 +52,18 @@
 <div class="log" id="log"></div>
 
 <script>
-let g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'' };
+let g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'', deviceLabel:'' };
 
 const logEl = document.getElementById('log');
 function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
 function toHex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 
-// === Parser Sylvac com debug ===
+// === Parser Sylvac: "+014.736 >" → value=14.736, unit=mm, status=NG ===
 function decodeSylvac(dv){
   const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  // remove bytes não-imprimíveis do começo/fim (STX=0x02, CR=0x0d, LF=0x0a etc)
   const printable = u8.filter(b => b>=0x20 && b<=0x7E); // 0x20..0x7E
   const txt = new TextDecoder('utf-8').decode(printable).trim();
 
-  // exemplos esperados: "0000.001 <", "027.99 >", "12.345"
   let value = NaN, unit='mm', status='OK';
   const m = txt.match(/[-+]?\d+(?:[.,]\d+)?/);
   if (m) value = parseFloat(m[0].replace(',', '.'));
@@ -97,16 +83,16 @@ function onValue(ev){
   const parsed=decodeSylvac(dv);
   const rawHex=toHex(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
 
-  // log de debug do texto ASCII
+  // debug do texto ASCII
   log('Texto: "'+parsed.rawText+'"', 'muted');
 
   const payload={
-    deviceName:g.device?.name||'',
-    deviceId:g.device?.id||'',
-    value:parsed.value,
-    unit:parsed.unit,
-    status:parsed.status,
-    battery:g.battery,
+    deviceName: g.deviceLabel || (g.device?.name||''),
+    deviceId: g.device?.id || '',
+    value: parsed.value,
+    unit: parsed.unit,
+    status: parsed.status,
+    battery: g.battery,
     rawHex
   };
   log('Leitura: '+JSON.stringify(payload),'ok');
@@ -115,12 +101,35 @@ function onValue(ev){
   if(endpoint) postToSheets(endpoint,payload);
 }
 
+async function readDISLabel(){
+  // Lê serial/model do Device Information Service para nome estável
+  g.deviceLabel = g.device?.name || '';
+  try{
+    const dis = await g.server.getPrimaryService('device_information');
+
+    async function readStr(uuid){
+      try{
+        const c = await dis.getCharacteristic(uuid);
+        const v = await c.readValue();
+        return new TextDecoder('utf-8').decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).trim();
+      }catch{ return ''; }
+    }
+
+    const serial = await readStr('serial_number_string');      // 0x2A25
+    const model  = await readStr('model_number_string');       // 0x2A24
+    const fw     = await readStr('firmware_revision_string');  // 0x2A26
+    const mfg    = await readStr('manufacturer_name_string');  // 0x2A29
+
+    g.deviceLabel = serial || model || g.deviceLabel;
+    log(`DIS: serial=${serial||'-'} model=${model||'-'} fw=${fw||'-'} mfg=${mfg||'-'}`, 'muted');
+  }catch{
+    log('Device Information Service não disponível (seguindo).','warn');
+  }
+}
+
 async function connectAndSubscribe(){
   try{
     const SVC=document.getElementById('svc').value.trim();
-    const CHR_NOTIFY=document.getElementById('chrNotify').value.trim();
-    const CHR_INDIC=document.getElementById('chrIndicate').value.trim();
-    const CHR_WRITE=document.getElementById('chrWrite').value.trim();
     const READ_BATT=document.getElementById('battery').checked;
 
     if(!navigator.bluetooth){ log('Web Bluetooth não suportado (use Chrome no Android).','err'); return; }
@@ -139,6 +148,7 @@ async function connectAndSubscribe(){
 
     g.device=device; log(`Selecionado: ${device.name||'(sem nome)'} — ID: ${device.id}`);
 
+    // Conecta
     g.server=await device.gatt.connect();
 
     // Bateria (opcional)
@@ -152,38 +162,53 @@ async function connectAndSubscribe(){
       }catch{ log('Battery service indisponível.','warn'); }
     }
 
-    g.svc=await g.server.getPrimaryService(SVC);
+    // Lê serial/model para rótulo estável
+    await readDISLabel();
 
-    // NOTIFY
-    try{
-      g.cNotify=await g.svc.getCharacteristic(CHR_NOTIFY);
+    // Serviço de medição
+    g.svc = await g.server.getPrimaryService(SVC);
+
+    // === Descoberta dinâmica das characteristics dentro do serviço ===
+    const chars = await g.svc.getCharacteristics();
+    g.cNotify = null; g.cIndicate = null; g.cWrite = null;
+
+    for (const c of chars) {
+      const p = c.properties || {};
+      if (!g.cNotify   && p.notify)                 g.cNotify = c;
+      if (!g.cIndicate && p.indicate)               g.cIndicate = c;
+      if (!g.cWrite    && (p.writeWithoutResponse || p.write)) g.cWrite = c;
+    }
+
+    // Assina notify/indicate
+    if (g.cNotify) {
       await g.cNotify.startNotifications();
       g.cNotify.addEventListener('characteristicvaluechanged', onValue);
-      log('NOTIFY assinada. Gere uma medida…','ok');
-    }catch{ log('Characteristic NOTIFY não disponível.','warn'); }
-
-    // INDICATE
-    try{
-      g.cIndicate=await g.svc.getCharacteristic(CHR_INDIC);
-      await g.cIndicate.startNotifications(); // Web Bluetooth trata indicate via notifications API
+      log('NOTIFY assinada ('+g.cNotify.uuid+'). Gere uma medida…','ok');
+    } else {
+      log('Characteristic NOTIFY não encontrada.','warn');
+    }
+    if (g.cIndicate) {
+      await g.cIndicate.startNotifications(); // WebBluetooth usa mesma API para indicate
       g.cIndicate.addEventListener('characteristicvaluechanged', onValue);
-      log('INDICATE assinada.','ok');
-    }catch{ log('Characteristic INDICATE não disponível.','warn'); }
+      log('INDICATE assinada ('+g.cIndicate.uuid+').','ok');
+    }
 
-    // WRITE
-    try{
-      g.cWrite=await g.svc.getCharacteristic(CHR_WRITE);
-      log('Canal de WRITE pronto.','ok');
-    }catch{ log('Characteristic WRITE não disponível.','warn'); }
+    if (g.cWrite) {
+      log('WRITE disponível ('+g.cWrite.uuid+').','ok');
+    } else {
+      log('Characteristic WRITE não encontrada.','warn');
+    }
 
     g.device.addEventListener('gattserverdisconnected', ()=>log('Desconectado.','warn'));
-  }catch(e){ log('Erro: '+e,'err'); }
+  }catch(e){
+    log('Erro: '+e,'err');
+  }
 }
 
 function disconnectNow(){
   try{
     if(g?.device?.gatt?.connected){ g.device.gatt.disconnect(); }
-    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'' };
+    g = { device:null, server:null, svc:null, cNotify:null, cIndicate:null, cWrite:null, battery:'', deviceLabel:'' };
     log('Conexão encerrada.','warn');
   }catch(e){ log('Falha ao desconectar: '+e,'err'); }
 }
