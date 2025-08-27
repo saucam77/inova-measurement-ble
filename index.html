@@ -1,11 +1,11 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>INOVA BLE → Sheets (mínimo · multi)</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;line-height:1.4}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;line-height:1.4}
   h1{font-size:18px;margin:0 0 8px}
   label{display:block;margin:10px 0 4px;font-weight:600}
   input,select{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px}
@@ -15,19 +15,17 @@
   #btnConnect{background:#0a7;color:#fff}
   #btnDisconnect{background:#c33;color:#fff}
   #btnDisconnectAll{background:#555;color:#fff}
-  .muted{color:#666;font-size:12px}
   .log{white-space:pre-wrap;background:#f8f8f8;border:1px solid #ddd;border-radius:10px;padding:12px;margin-top:12px;max-height:60vh;overflow:auto}
   .ok{color:#0a8}.warn{color:#c80}.err{color:#c00}.info{color:#036}
 </style>
 </head>
 <body>
 <h1>INOVA BLE → Google Sheets (mínimo)</h1>
-<p class="muted">Conecte vários Sylvac. Sem comandos; só receber medições com estabilidade.</p>
 
 <div class="row">
   <div>
     <label>GAS_ENDPOINT (Apps Script)</label>
-    <input id="endpoint" type="text" value="https://script.google.com/macros/s/AKfycbwn8jFg3x0CWlLqTOVhT7LJ2XTNdL0d9VEllL8qN3W-RFIFFMZaaxRc3MJiGm01Fxha/exec">
+    <input id="endpoint" type="text" value="SUA_URL_DO_APPS_SCRIPT_AQUI">
   </div>
   <div>
     <label>Service UUID (Sylvac – medição)</label>
@@ -43,7 +41,7 @@
 
 <div style="margin-top:12px">
   <button id="btnConnect">+ Conectar dispositivo</button>
-  <select id="selActive" style="min-width:320px" title="Conectados"></select>
+  <select id="sel" style="min-width:320px" title="Conectados"></select>
   <button id="btnDisconnect">Desconectar selecionado</button>
   <button id="btnDisconnectAll">Desconectar TODOS</button>
 </div>
@@ -51,178 +49,97 @@
 <div class="log" id="log"></div>
 
 <script>
-/* ================= Constantes Sylvac ================= */
-const UUID_SVC_DEFAULT = 'c1b25000-caaf-6d0e-4c33-7dae30052840';
-const UUID_DATA_IND    = 'c1b25010-caaf-6d0e-4c33-7dae30052840'; // INDICATE
-const UUID_DATA_NOT    = 'c1b25013-caaf-6d0e-4c33-7dae30052840'; // NOTIFY
-const CCCD             = '00002902-0000-1000-8000-00805f9b34fb';
+const UUID_SVC_DEFAULT='c1b25000-caaf-6d0e-4c33-7dae30052840';
+const UUID_IND='c1b25010-caaf-6d0e-4c33-7dae30052840';
+const UUID_NOT='c1b25013-caaf-6d0e-4c33-7dae30052840';
+const CCCD='00002902-0000-1000-8000-00805f9b34fb';
 
-/* ================= Estado ================= */
 class Session{
   constructor(device){ this.device=device; this.server=null; this.svc=null;
     this.cInd=null; this.cNot=null; this.battery=null;
     this.model=''; this.serial=''; this.systemId=''; this.pnpId='';
-    this.stableId=''; this.macLike=''; this._onInd=null; this._onNot=null; this.reconnecting=false;
+    this.stableId=''; this._onInd=null; this._onNot=null; this.reconnecting=false;
   }
 }
-const sessions = new Map(); /* chromeDeviceId -> Session */
-const sel = document.getElementById('selActive');
-const logEl = document.getElementById('log');
+const sessions=new Map();
+const sel=document.getElementById('sel'); const logEl=document.getElementById('log');
 
-/* ================= Util ================= */
-function log(msg, cls=''){ const d=document.createElement('div'); d.textContent=msg; if(cls) d.className=cls; logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
-function hex(u8){ return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
-function decodeSylvac(dv){
-  const u8=new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  const printable = u8.filter(b=>b>=0x20&&b<=0x7E);
-  const txt=new TextDecoder().decode(printable).trim();
-  let value=NaN, unit='mm', status='OK';
-  const m=txt.match(/[-+]?\d+(?:[.,]\d+)?/); if(m) value=parseFloat(m[0].replace(',','.'));
-  if(txt.includes('<')||txt.includes('>')) status='NG';
-  return { value, unit, status, rawText: txt };
-}
-function addOption(sess){
-  const o=document.createElement('option');
-  o.value=sess.device.id; o.textContent=`${sess.device.name||'(sem nome)'} · ${sess.device.id}`;
-  sel.appendChild(o); sel.value=sess.device.id;
-}
+function log(m,c=''){const d=document.createElement('div');d.textContent=m;if(c)d.className=c;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;}
+function hex(u8){return Array.from(u8).map(b=>b.toString(16).padStart(2,'0')).join(' ');}
+function decodeSylvac(dv){const u8=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength);const pr=u8.filter(b=>b>=0x20&&b<=0x7E);const txt=new TextDecoder().decode(pr).trim();let value=NaN,unit='mm',status='OK';const m=txt.match(/[-+]?\d+(?:[.,]\d+)?/);if(m)value=parseFloat(m[0].replace(',','.'));if(txt.includes('<')||txt.includes('>'))status='NG';return{value,unit,status,rawText:txt};}
+function addOption(sess){const o=document.createElement('option');o.value=sess.device.id;o.textContent=`${sess.device.name||'(sem nome)'} · ${sess.device.id}`;sel.appendChild(o);sel.value=sess.device.id;}
 
-/* ================= GAS ================= */
 async function postToSheets(p){
-  const endpoint=document.getElementById('endpoint').value.trim();
-  if(!endpoint) return;
-  try{
-    await fetch(endpoint,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-  }catch(e){ log('Falha ao enviar ao GAS: '+e,'warn'); }
+  const endpoint=document.getElementById('endpoint').value.trim(); if(!endpoint) return;
+  try{ await fetch(endpoint,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}); }
+  catch(e){ log('Falha ao enviar ao GAS: '+e,'warn'); }
 }
 
-/* ================= DIS & ID estável ================= */
 async function readDIS(sess){
   try{
     const dis=await sess.server.getPrimaryService('device_information');
-    async function rStr(u){ try{ const c=await dis.getCharacteristic(u); const v=await c.readValue(); return new TextDecoder().decode(v).trim(); }catch{return '';} }
-    async function rBin(u){ try{ const c=await dis.getCharacteristic(u); const v=await c.readValue(); return Array.from(new Uint8Array(v.buffer)).map(b=>b.toString(16).padStart(2,'0')).join(':'); }catch{return '';} }
-
-    sess.serial   = await rStr('serial_number_string');  // 0x2A25
-    sess.model    = await rStr('model_number_string');   // 0x2A24
-    sess.systemId = await rBin('system_id');             // 0x2A23
-    sess.pnpId    = await rBin('pnp_id');                // 0x2A50
-
-    // ID estável
-    sess.stableId = sess.serial ? ('SN:'+sess.serial) :
-                    (sess.systemId ? ('SYSID:'+sess.systemId) :
-                    (sess.pnpId ? ('PNP:'+sess.pnpId) : ('MODEL:'+(sess.model||'')+'#'+sess.device.id)));
-
-    // “macLike” legível a partir do system_id (meramente indicativo)
-    if(sess.systemId){
-      const parts = sess.systemId.split(':').filter(Boolean).slice(0,6);
-      sess.macLike = parts.join(':').toUpperCase();
-    }
-    log(`INFO[${sess.device.id}] model=${sess.model||'-'} serial=${sess.serial||'-'} sysId=${sess.systemId||'-'} macLike=${sess.macLike||'-'}`,'info');
-  }catch{
-    log('INFO: DIS indisponível (seguindo).','warn');
-    sess.stableId = 'MODEL:'+(sess.model||'')+'#'+sess.device.id;
-  }
+    async function rStr(u){try{const c=await dis.getCharacteristic(u);const v=await c.readValue();return new TextDecoder().decode(v).trim();}catch{return ''}}
+    async function rBin(u){try{const c=await dis.getCharacteristic(u);const v=await c.readValue();return Array.from(new Uint8Array(v.buffer)).map(b=>b.toString(16).padStart(2,'0')).join(':');}catch{return ''}}
+    sess.serial=await rStr('serial_number_string');
+    sess.model=await rStr('model_number_string');
+    sess.systemId=await rBin('system_id');
+    sess.pnpId=await rBin('pnp_id');
+    sess.stableId = sess.serial?('SN:'+sess.serial):(sess.systemId?('SYSID:'+sess.systemId):(sess.pnpId?('PNP:'+sess.pnpId):('MODEL:'+(sess.model||'')+'#'+sess.device.id)));
+    log(`INFO[${sess.device.id}] model=${sess.model||'-'} serial=${sess.serial||'-'} sysId=${sess.systemId||'-'}`,'info');
+  }catch{ log('INFO: DIS indisponível.','warn'); }
 }
-
-/* ================= Assinatura CCCD ================= */
-async function enableCCCD(ch, val){ try{ const d=await ch.getDescriptor(CCCD); await d.writeValue(Uint8Array.of(val,0x00)); }catch{} }
+async function enableCCCD(ch,val){try{const d=await ch.getDescriptor(CCCD);await d.writeValue(Uint8Array.of(val,0x00));}catch{}}
 
 async function setup(sess, svcUuid){
   if(!sess.server?.connected) throw new Error('GATT desconectado');
-  sess.svc = await sess.server.getPrimaryService(svcUuid);
+  sess.svc=await sess.server.getPrimaryService(svcUuid);
+  async function getBy(uuid,prop){try{return await sess.svc.getCharacteristic(uuid);}catch(_){} const all=await sess.svc.getCharacteristics(); for(const c of all){const p=c.properties||{}; if(prop==='ind'&&p.indicate)return c; if(prop==='not'&&p.notify)return c;} return null;}
+  sess.cInd=await getBy(UUID_IND,'ind');
+  sess.cNot=await getBy(UUID_NOT,'not');
 
-  // pega características por UUID, com fallback por propriedade
-  async function getBy(uuid, prop){
-    try{ return await sess.svc.getCharacteristic(uuid); }catch(_){}
-    const all=await sess.svc.getCharacteristics();
-    for(const c of all){ const p=c.properties||{}; if(prop==='ind'&&p.indicate) return c; if(prop==='not'&&p.notify) return c; }
-    return null;
-  }
-  sess.cInd = await getBy(UUID_DATA_IND,'ind');
-  sess.cNot = await getBy(UUID_DATA_NOT,'not');
-
-  // Data INDICATE
   if(sess.cInd){
     await sess.cInd.startNotifications().catch(()=>{});
     await enableCCCD(sess.cInd,0x02);
-    sess.cInd.removeEventListener?.('characteristicvaluechanged', sess._onInd);
-    sess._onInd = (ev)=>{
-      const p=decodeSylvac(ev.target.value);
-      log(`VAL[${sess.device.id}] ${p.rawText}`);
-      if(!Number.isNaN(p.value)){
-        postToSheets({
-          deviceName: sess.device.name||'',
-          stableId: sess.stableId, model: sess.model, serial: sess.serial,
-          systemId: sess.systemId, pnpId: sess.pnpId,
-          chromeDeviceId: sess.device.id,
-          value: p.value, unit: p.unit, status: p.status,
-          battery: sess.battery, rawHex: hex(new Uint8Array(ev.target.value.buffer))
-        });
-      }
-    };
-    sess.cInd.addEventListener('characteristicvaluechanged', sess._onInd);
+    sess.cInd.removeEventListener?.('characteristicvaluechanged',sess._onInd);
+    sess._onInd=(ev)=>{const p=decodeSylvac(ev.target.value); log(`VAL[${sess.device.id}] ${p.rawText}`); if(!Number.isNaN(p.value)){ postToSheets({
+        deviceName:sess.device.name||'', stableId:sess.stableId, model:sess.model, serial:sess.serial,
+        systemId:sess.systemId, pnpId:sess.pnpId, chromeDeviceId:sess.device.id,
+        value:p.value, unit:p.unit, status:p.status, battery:sess.battery,
+        rawHex:hex(new Uint8Array(ev.target.value.buffer))
+    });}};
+    sess.cInd.addEventListener('characteristicvaluechanged',sess._onInd);
     log('INFO: INDICATE assinada.','ok');
-  } else {
-    log('WARN: Característica INDICATE não encontrada.','warn');
-  }
+  } else { log('WARN: INDICATE não encontrada.','warn'); }
 
-  // Data NOTIFY
   if(sess.cNot){
     await sess.cNot.startNotifications().catch(()=>{});
     await enableCCCD(sess.cNot,0x01);
-    sess.cNot.removeEventListener?.('characteristicvaluechanged', sess._onNot);
-    sess._onNot = (ev)=>{
-      const p=decodeSylvac(ev.target.value);
-      log(`VAL[${sess.device.id}] ${p.rawText}`);
-      if(!Number.isNaN(p.value)){
-        postToSheets({
-          deviceName: sess.device.name||'',
-          stableId: sess.stableId, model: sess.model, serial: sess.serial,
-          systemId: sess.systemId, pnpId: sess.pnpId,
-          chromeDeviceId: sess.device.id,
-          value: p.value, unit: p.unit, status: p.status,
-          battery: sess.battery, rawHex: hex(new Uint8Array(ev.target.value.buffer))
-        });
-      }
-    };
-    sess.cNot.addEventListener('characteristicvaluechanged', sess._onNot);
+    sess.cNot.removeEventListener?.('characteristicvaluechanged',sess._onNot);
+    sess._onNot=(ev)=>{const p=decodeSylvac(ev.target.value); log(`VAL[${sess.device.id}] ${p.rawText}`); if(!Number.isNaN(p.value)){ postToSheets({
+        deviceName:sess.device.name||'', stableId:sess.stableId, model:sess.model, serial:sess.serial,
+        systemId:sess.systemId, pnpId:sess.pnpId, chromeDeviceId:sess.device.id,
+        value:p.value, unit:p.unit, status:p.status, battery:sess.battery,
+        rawHex:hex(new Uint8Array(ev.target.value.buffer))
+    });}};
+    sess.cNot.addEventListener('characteristicvaluechanged',sess._onNot);
     log('INFO: NOTIFY assinada.','ok');
-  } else {
-    log('WARN: Característica NOTIFY não encontrada.','warn');
-  }
+  } else { log('WARN: NOTIFY não encontrada.','warn'); }
 
-  // Se nenhuma assinou, tenta de novo após 1,5s (instrumento pode “acordar”)
-  if(!sess.cInd && !sess.cNot){
-    setTimeout(async()=>{ if(sess.server?.connected){ try{ await setup(sess, svcUuid); }catch(_){} } }, 1500);
-  }
+  if(!sess.cInd && !sess.cNot){ setTimeout(async()=>{ if(sess.server?.connected){ try{ await setup(sess, svcUuid); }catch(_){} }}, 1500); }
 }
 
-/* ================= Conectar / Desconectar ================= */
 async function connectDevice(){
   try{
-    const svcUuid = (document.getElementById('svc').value || UUID_SVC_DEFAULT).trim();
-    const dev = await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true,
-      optionalServices:[svcUuid,'battery_service','device_information']
-    });
+    const svcUuid=(document.getElementById('svc').value||UUID_SVC_DEFAULT).trim();
+    const dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true, optionalServices:[svcUuid,'battery_service','device_information']});
     if(!dev) return;
+    const sess=new Session(dev); sessions.set(dev.id,sess); addOption(sess);
+    log(`INFO: selecionado ${dev.name||'(sem nome)'} — ${dev.id}`,'info');
 
-    const sess = new Session(dev);
-    sessions.set(dev.id, sess);
-    addOption(sess);
-
-    log(`INFO: selecionado ${dev.name||'(sem nome)'} — ${dev.id}`, 'info');
-
-    sess.server = await dev.gatt.connect();
+    sess.server=await dev.gatt.connect();
 
     if(document.getElementById('battery').checked){
-      try{
-        const bs=await sess.server.getPrimaryService('battery_service');
-        const bc=await bs.getCharacteristic('battery_level');
-        sess.battery=(await bc.readValue()).getUint8(0);
-        log(`INFO: bateria ${dev.id} = ${sess.battery}%`,'info');
-      }catch{ log('INFO: Battery service indisponível.','warn'); }
+      try{ const bs=await sess.server.getPrimaryService('battery_service'); const bc=await bs.getCharacteristic('battery_level'); sess.battery=(await bc.readValue()).getUint8(0); log(`INFO: bateria ${dev.id} = ${sess.battery}%`,'info'); }catch{ log('INFO: Battery service indisponível.','warn'); }
     }
 
     await readDIS(sess);
@@ -232,12 +149,8 @@ async function connectDevice(){
       log(`WARN: desconectado ${dev.id}`,'warn');
       if(document.getElementById('autorec').checked && !sess.reconnecting){
         sess.reconnecting=true;
-        try{
-          await new Promise(r=>setTimeout(r,700));
-          await dev.gatt.connect();
-          log(`OK: reconectado ${dev.id}`,'ok');
-          await setup(sess, svcUuid);
-        }catch{ log(`ERR: falha ao reconectar ${dev.id}`,'err'); }
+        try{ await new Promise(r=>setTimeout(r,700)); await dev.gatt.connect(); log(`OK: reconectado ${dev.id}`,'ok'); await setup(sess, svcUuid); }
+        catch{ log(`ERR: falha ao reconectar ${dev.id}`,'err'); }
         finally{ sess.reconnecting=false; }
       }
     });
@@ -247,24 +160,35 @@ async function connectDevice(){
 
 function active(){ const id=sel.value; return id? sessions.get(id):null; }
 
-function disconnectSelected(){
+async function cleanDisconnect(sess){
+  // parar notificações e remover handlers
+  try{
+    if(sess.cInd){ try{ await sess.cInd.stopNotifications(); }catch{} sess.cInd.removeEventListener?.('characteristicvaluechanged',sess._onInd); }
+    if(sess.cNot){ try{ await sess.cNot.stopNotifications(); }catch{} sess.cNot.removeEventListener?.('characteristicvaluechanged',sess._onNot); }
+  }catch(_){}
+  // desconectar (com pequena espera)
+  try{ if(sess.server?.connected){ sess.device.gatt.disconnect(); await new Promise(r=>setTimeout(r,300)); } }catch(_){}
+}
+
+async function disconnectSelected(){
   const s=active(); if(!s){ log('Nada selecionado.','warn'); return; }
-  try{ if(s.server?.connected) s.device.gatt.disconnect(); }catch(_){}
+  await cleanDisconnect(s);
   sessions.delete(s.device.id);
   sel.remove(sel.selectedIndex);
   log(`INFO: encerrado ${s.device.id}`,'info');
 }
 
-function disconnectAll(){
-  for(const s of sessions.values()){ try{ if(s.server?.connected) s.device.gatt.disconnect(); }catch(_){} }
+async function disconnectAll(){
+  const all=[...sessions.values()];
+  for(const s of all){ await cleanDisconnect(s); }
   sessions.clear(); sel.innerHTML='';
   log('INFO: todos desconectados.','info');
 }
 
-/* ================= Enlaces UI ================= */
+/* UI */
 document.getElementById('btnConnect').addEventListener('click', connectDevice);
-document.getElementById('btnDisconnect').addEventListener('click', disconnectSelected);
-document.getElementById('btnDisconnectAll').addEventListener('click', disconnectAll);
+document.getElementById('btnDisconnect').addEventListener('click', ()=>{ disconnectSelected(); });
+document.getElementById('btnDisconnectAll').addEventListener('click', ()=>{ disconnectAll(); });
 </script>
 </body>
 </html>
